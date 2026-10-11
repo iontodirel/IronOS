@@ -1,0 +1,356 @@
+#include "ts21.h"
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+volatile struct TS21Status ts21_status;
+
+struct Register {
+  uint32_t address;
+  uint32_t value;
+};
+
+static struct Register registers[128];
+static struct Register writes[4096];
+static unsigned        register_count;
+static unsigned        write_count;
+static uint32_t        ticks;
+static bool            clock_ready;
+static bool            clock_running;
+static bool            calibration_complete;
+static bool            conversion_complete;
+static uint32_t        input_a;
+static bool            scl_stuck;
+static bool            sda_stuck;
+static bool            acknowledge;
+static bool            i2c_active;
+static unsigned        i2c_pulses;
+static uint8_t         i2c_byte;
+static uint8_t         i2c_bytes[130];
+static unsigned        i2c_count;
+static uint8_t         uart_bytes[32];
+static unsigned        uart_size;
+static unsigned        uart_position;
+static uint32_t        uart_error;
+
+static uint32_t *reg(uint32_t address) {
+  for (unsigned i = 0; i < register_count; ++i) {
+    if (registers[i].address == address) {
+      return &registers[i].value;
+    }
+  }
+  assert(register_count < sizeof(registers) / sizeof(registers[0]));
+  registers[register_count].address = address;
+  registers[register_count].value   = 0;
+  return &registers[register_count++].value;
+}
+
+uint32_t ts21_mmio_read(uint32_t address) {
+  if (address == TS21_RCC) {
+    return clock_ready ? (*reg(address) | 2U) : (*reg(address) & ~2U);
+  }
+  if (address == TS21_SYSTICK + 8) {
+    if (clock_running && (*reg(TS21_SYSTICK) & 1U)) {
+      ++ticks;
+    }
+    return ticks;
+  }
+  if (address == TS21_ADC1 + 8 && calibration_complete) {
+    *reg(address) &= ~12U;
+  }
+  if (address == TS21_GPIOA + 8) {
+    return input_a;
+  }
+  if (address == TS21_GPIOB + 8) {
+    uint32_t result = *reg(TS21_GPIOB + 12);
+    if (scl_stuck) {
+      result &= ~TS21_SCL;
+    }
+    if (sda_stuck || (i2c_active && i2c_pulses && i2c_pulses % 9 == 0 && acknowledge)) {
+      result &= ~TS21_SDA;
+    }
+    return result;
+  }
+  if (address == TS21_USART2) {
+    return uart_error | (uart_position < uart_size ? 0x20U : 0U);
+  }
+  if (address == TS21_USART2 + 4) {
+    uart_error = 0;
+    return uart_position < uart_size ? uart_bytes[uart_position++] : 0;
+  }
+  return *reg(address);
+}
+
+void ts21_mmio_write(uint32_t address, uint32_t value) {
+  assert(write_count < sizeof(writes) / sizeof(writes[0]));
+  writes[write_count++] = (struct Register){address, value};
+  *reg(address)         = value;
+  if (address == TS21_GPIOA + 0x10) {
+    *reg(TS21_GPIOA + 12) |= value;
+  } else if (address == TS21_GPIOA + 0x14) {
+    *reg(TS21_GPIOA + 12) &= ~value;
+  } else if (address == TS21_GPIOB + 0x10 || address == TS21_GPIOB + 0x14) {
+    const uint32_t old    = *reg(TS21_GPIOB + 12);
+    const uint32_t next   = address == TS21_GPIOB + 0x10 ? old | value : old & ~value;
+    *reg(TS21_GPIOB + 12) = next;
+    if ((old & TS21_SCL) && (next & TS21_SCL)) {
+      if ((old & TS21_SDA) && !(next & TS21_SDA)) {
+        i2c_active = true;
+        i2c_pulses = 0;
+        i2c_byte   = 0;
+      } else if (!(old & TS21_SDA) && (next & TS21_SDA)) {
+        i2c_active = false;
+      }
+    }
+    if (i2c_active && !(old & TS21_SCL) && (next & TS21_SCL)) {
+      ++i2c_pulses;
+      if (i2c_pulses % 9) {
+        i2c_byte = (uint8_t)((i2c_byte << 1) | ((next & TS21_SDA) ? 1U : 0U));
+      } else {
+        assert(i2c_count < sizeof(i2c_bytes));
+        i2c_bytes[i2c_count++] = i2c_byte;
+        i2c_byte               = 0;
+      }
+    }
+  } else if (address == TS21_ADC1 + 8 && (value & 0x400000U) && conversion_complete) {
+    *reg(TS21_ADC1) |= 2;
+    *reg(TS21_ADC1 + 0x4C) = 0xFABC;
+  }
+}
+
+static void reset(void) {
+  memset(registers, 0, sizeof(registers));
+  memset(writes, 0, sizeof(writes));
+  ts21_status    = (struct TS21Status){0};
+  register_count = write_count = 0;
+  ticks                        = 0;
+  clock_ready = clock_running = calibration_complete = conversion_complete = true;
+  input_a                                                                  = (1U << 5) | (1U << 7);
+  scl_stuck = sda_stuck = i2c_active = false;
+  acknowledge                        = true;
+  i2c_pulses = i2c_count = 0;
+  uart_size = uart_position = 0;
+  uart_error                = 0;
+  *reg(TS21_GPIOA + 12)     = TS21_HEATER_EN | TS21_HEATER_IN;
+  *reg(TS21_TIM3)           = 1;
+  *reg(TS21_TIM3 + 0x20)    = 1;
+  *reg(TS21_TIM3 + 0x34)    = 959;
+}
+
+static void require_inhibited(void) {
+  assert(!(*reg(TS21_GPIOA + 12) & (TS21_HEATER_EN | TS21_HEATER_IN)));
+  assert(*reg(TS21_TIM3) == 0);
+  assert(*reg(TS21_TIM3 + 0x20) == 0);
+  assert(*reg(TS21_TIM3 + 0x34) == 0);
+  for (unsigned i = 0; i < write_count; ++i) {
+    const uint32_t address = writes[i].address;
+    const uint32_t value   = writes[i].value;
+    if (address == TS21_GPIOA + 0x10) {
+      assert(!(value & (TS21_HEATER_EN | TS21_HEATER_IN)));
+    }
+    if (address == TS21_TIM3 || address == TS21_TIM3 + 0x20 || address == TS21_TIM3 + 0x34) {
+      assert(value == 0);
+    }
+    if (address == TS21_USART2 + 12) {
+      assert(!(value & 8U));
+    }
+    assert(address != TS21_USART2 + 4);
+    assert(address < 0x08000000 || address >= 0x08010000);
+    assert(address < 0x40022000 || address >= 0x40022400);
+  }
+}
+
+static void append_frame(uint8_t voltage, uint8_t status) {
+  assert(uart_size + 4 <= sizeof(uart_bytes));
+  uint8_t *frame = uart_bytes + uart_size;
+  frame[0]       = 0xFF;
+  frame[1]       = voltage;
+  frame[2]       = status;
+  frame[3]       = ts21_crc8(frame, 3);
+  uart_size += 4;
+}
+
+static void test_protocol(void) {
+  const uint8_t check[] = "123456789";
+  assert(ts21_crc8(check, 9) == 0xA1);
+  for (unsigned voltage = 0; voltage < 256; ++voltage) {
+    for (unsigned status = 0; status < 256; ++status) {
+      struct TS21PDParser parser   = {{0}, 0};
+      struct TS21PDFrame  frame    = {0, 0};
+      uint8_t             packet[] = {0xFF, (uint8_t)voltage, (uint8_t)status, 0};
+      packet[3]                    = ts21_crc8(packet, 3);
+      assert(!ts21_pd_feed(&parser, 0, &frame));
+      for (unsigned i = 0; i < 3; ++i) {
+        assert(!ts21_pd_feed(&parser, packet[i], &frame));
+      }
+      assert(ts21_pd_feed(&parser, packet[3], &frame));
+      assert(frame.voltage == voltage && frame.status == status && parser.used == 0);
+    }
+  }
+  struct TS21PDParser parser   = {{0}, 0};
+  struct TS21PDFrame  frame    = {0, 0};
+  uint8_t             packet[] = {0xFF, 20, 1, 0};
+  packet[3]                    = ts21_crc8(packet, 3);
+  const uint8_t corrupt[]      = {0xFF, 0x12, 0x34};
+  for (unsigned i = 0; i < sizeof(corrupt); ++i) {
+    assert(!ts21_pd_feed(&parser, corrupt[i], &frame));
+  }
+  for (unsigned i = 0; i < 3; ++i) {
+    assert(!ts21_pd_feed(&parser, packet[i], &frame));
+  }
+  assert(ts21_pd_feed(&parser, packet[3], &frame));
+  assert(frame.voltage == 20 && frame.status == 1);
+}
+
+static void test_startup_and_inputs(void) {
+  reset();
+  assert(ts21_board_init());
+  assert(ts21_status.errors == 0);
+  require_inhibited();
+  unsigned clear_index = 0;
+  unsigned mode_index  = 0;
+  for (unsigned i = 0; i < write_count; ++i) {
+    if (!clear_index && writes[i].address == TS21_GPIOA + 0x14 && writes[i].value == TS21_HEATER_EN) {
+      clear_index = i;
+    }
+    if (!mode_index && writes[i].address == TS21_GPIOA + 4) {
+      mode_index = i;
+    }
+  }
+  assert(clear_index && mode_index && clear_index < mode_index);
+  assert(ts21_buttons() == 0);
+  input_a &= ~(1U << 5);
+  assert(ts21_buttons() == 1);
+  input_a &= ~(1U << 7);
+  assert(ts21_buttons() == 3);
+  input_a |= 1U << 5;
+  assert(ts21_buttons() == 2);
+  const uint8_t channels[] = {1, 2, 4, 9};
+  for (unsigned i = 0; i < sizeof(channels); ++i) {
+    uint16_t sample = 0;
+    assert(ts21_adc_read(channels[i], &sample));
+    assert(sample == 0xABC);
+    assert(*reg(TS21_ADC1 + 0x34) == channels[i]);
+  }
+  uint16_t unchanged = 0xBEEF;
+  assert(!ts21_adc_read(3, &unchanged));
+  assert(unchanged == 0xBEEF);
+  assert(ts21_status.errors & TS21_ERROR_ARGUMENT);
+  require_inhibited();
+}
+
+static void test_faults(void) {
+  reset();
+  clock_ready = false;
+  assert(!ts21_board_init());
+  assert(ts21_status.errors & TS21_ERROR_CLOCK);
+  require_inhibited();
+
+  reset();
+  calibration_complete = false;
+  assert(ts21_board_init());
+  uint16_t value = 0xBEEF;
+  assert(!ts21_adc_read(1, &value));
+  assert(value == 0xBEEF && (ts21_status.errors & TS21_ERROR_ADC));
+  require_inhibited();
+
+  reset();
+  assert(ts21_board_init());
+  conversion_complete = false;
+  assert(!ts21_adc_read(1, &value));
+  assert(value == 0xBEEF && (ts21_status.errors & TS21_ERROR_ADC));
+  clock_running = false;
+  assert(!ts21_delay_us(10));
+  assert(ts21_status.errors & TS21_ERROR_CLOCK);
+  require_inhibited();
+}
+
+static void test_i2c_and_passive_uart(void) {
+  reset();
+  assert(ts21_board_init());
+  append_frame(20, 7);
+  const uint8_t commands[] = {0xAE, 0xAF};
+  assert(ts21_oled_write(0, commands, sizeof(commands)));
+  const uint8_t expected[] = {0x78, 0x00, 0xAE, 0xAF};
+  assert(i2c_count == sizeof(expected));
+  assert(memcmp(expected, i2c_bytes, sizeof(expected)) == 0);
+  assert(!i2c_active);
+  assert(ts21_status.pd_frames == 1);
+  assert(ts21_status.pd_voltage == 20 && ts21_status.pd_status == 7);
+  require_inhibited();
+
+  acknowledge = false;
+  assert(!ts21_oled_write(0, commands, sizeof(commands)));
+  assert(ts21_status.errors & TS21_ERROR_I2C_NACK);
+  assert(!i2c_active);
+  require_inhibited();
+
+  scl_stuck = true;
+  assert(!ts21_oled_write(0, commands, sizeof(commands)));
+  assert(ts21_status.errors & TS21_ERROR_I2C_BUS);
+  require_inhibited();
+
+  reset();
+  assert(ts21_board_init());
+  sda_stuck = true;
+  assert(!ts21_oled_write(0, commands, sizeof(commands)));
+  assert(ts21_status.errors & TS21_ERROR_I2C_BUS);
+  require_inhibited();
+
+  reset();
+  assert(ts21_board_init());
+  uart_error = 8;
+  ts21_uart_poll();
+  assert(ts21_status.errors & TS21_ERROR_UART);
+  assert(ts21_status.pd_frames == 0);
+  assert(!ts21_oled_write(1, commands, sizeof(commands)));
+  assert(ts21_status.errors & TS21_ERROR_ARGUMENT);
+  require_inhibited();
+}
+
+static void test_full_oled_page_and_bounds(void) {
+  reset();
+  assert(ts21_board_init());
+  uint8_t page[128];
+  for (unsigned i = 0; i < sizeof(page); ++i) {
+    page[i] = (uint8_t)i;
+  }
+  assert(ts21_oled_write(0x40, page, sizeof(page)));
+  assert(i2c_count == sizeof(page) + 2);
+  assert(i2c_bytes[0] == 0x78 && i2c_bytes[1] == 0x40);
+  assert(memcmp(page, i2c_bytes + 2, sizeof(page)) == 0);
+  assert(!i2c_active);
+
+  const unsigned before = write_count;
+  assert(!ts21_oled_write(0x40, NULL, sizeof(page)));
+  assert(!ts21_oled_write(0x40, page, 0));
+  assert(!ts21_oled_write(0x40, page, sizeof(page) + 1));
+  assert(write_count == before);
+  assert(ts21_status.errors & TS21_ERROR_ARGUMENT);
+  require_inhibited();
+}
+
+static void test_timebase_wrap_and_bounds(void) {
+  reset();
+  assert(ts21_board_init());
+  ticks = UINT32_MAX - 3;
+  assert(ts21_delay_us(10));
+  assert(ticks < 16);
+  assert(ts21_status.errors == 0);
+  const uint32_t before = ticks;
+  assert(!ts21_delay_us(100001));
+  assert(ticks == before);
+  assert(ts21_status.errors & TS21_ERROR_ARGUMENT);
+  require_inhibited();
+}
+
+int main(void) {
+  test_protocol();
+  test_startup_and_inputs();
+  test_faults();
+  test_i2c_and_passive_uart();
+  test_full_oled_page_and_bounds();
+  test_timebase_wrap_and_bounds();
+  puts("TS21 host tests passed: protocol, inhibit ordering, inputs, ADC, UART, I2C and bounded failures");
+  return 0;
+}

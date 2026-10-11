@@ -54,6 +54,11 @@ _PD Mode_ option in _Power settings_ submenu to _Safe_ or _Default_.
 
 \*\*\*\*\* Some users confirm that there is a version of newer _TS101_ revision with another OLED screen model, which is not supported yet at all by _IronOS_ unfortunately. See [this bug report](https://github.com/Ralim/IronOS/issues/2063) for more information.
 
+## Experimental TS21 development
+
+The [TS21 bring-up target](source/Core/BSP/TS21/README.md) is a standalone, heater-disabled diagnostic, **not working IronOS soldering firmware**.
+It has not been tested on hardware and is excluded from supported models and release builds.
+
 ## Getting Started
 
 To get started with _IronOS firmware_, please jump to [Getting Started Guide](https://ralim.github.io/IronOS/GettingStarted/).
