@@ -8,7 +8,8 @@ and image inspection do not establish hardware compatibility or safety.
 There is no heater-enable path, temperature conversion, PID control, power
 negotiation, settings persistence, motion support, or FreeRTOS integration.
 The OLED header says `NO HEATING`. TS21 is deliberately absent from the normal
-`model=` list and release builds. No HEX/DFU image or flashing target is provided.
+`model=` list and release builds. An explicitly enabled HEX export is available
+only for cartridge-removed bench testing. There is no automatic flashing target.
 Do not install this as a replacement for stock soldering firmware.
 
 ## Build and host tests
@@ -38,6 +39,17 @@ already exists. The board-local equivalent is
 `make -C source/Core/BSP/TS21 probe EXPERIMENTAL=1 CROSS_COMPILE=...`.
 The host tests do not require the cross compiler or experimental opt-in.
 
+To export an Intel HEX file for a controlled, cartridge-removed diagnostic run:
+
+```sh
+make ts21-bringup-hex TS21_EXPERIMENTAL=1 CROSS_COMPILE="$HOME/ts21-toolchain/bin/riscv-none-embed-"
+```
+
+The board-local target is `probe-hex EXPERIMENTAL=1`. It creates
+`source/Objects/TS21-bringup/TS21_BRINGUP_NOHEAT.hex`, still outside release output
+directories. The default `probe` / `ts21-bringup` targets remain ELF-only.
+Both diagnostic targets refuse to run without their experimental opt-in.
+
 On Windows, run these tools inside WSL rather than executing the Linux compiler
 directly. For example, the host-test command from PowerShell is:
 
@@ -51,16 +63,59 @@ The build runs `tools/inspect_image.py`; its success status is explicitly
 the entry jump, vectors, flash bounds, and the reserved stack. It does not
 validate peripheral behavior or the bootloader's acceptance of an image.
 
+HEX exports are checked record-by-record for syntax, checksums, address bounds,
+ordering, entry point, and EOF. Every exported byte/address must match the
+validated ELF's loadable flash contents exactly; missing, extra, and changed
+bytes are rejected. Only the data, EOF, extended-linear-address, and
+start-linear-address record types used by the stock image and `objcopy` are
+accepted. A failed export check fails the build, not a warning-only result.
+
 The C tests exercise the real register-access routines with mock MMIO: inhibit
 ordering, button and ADC reads, UART receive/error handling, OLED wire bytes,
 stuck buses, NACKs, and bounded timeouts. They also check that exercised paths do
 not enable the heater timer, raise its control pins, transmit UART data, or
 write flash. Protocol coverage includes every pair of payload bytes and recovery
 from a corrupt packet. Python tests cover accepted/rejected image layouts and
-generation of the existing font. These are software checks, not board tests.
+generation of the existing font, plus valid and malformed HEX exports.
+These are software checks, not board tests.
 
 The C files use `source/.clang-format` (checked with clang-format 18); the Python
 files use Black and the repository's `.flake8` configuration.
+
+## Cartridge-removed diagnostic flashing
+
+**Remove the cartridge while the iron is unplugged and cool, and leave it out
+throughout diagnostic testing.** Software heater inhibition has not been
+confirmed electrically. Do not rely on the screen or the build name for safety.
+
+An observed TS21 update device presents a `TS21_DFU` volume and USB ID
+`1A86:FE10` (`CH20xUDisk`). Drive letters are not fixed. Verify the model and
+update volume rather than copying to an arbitrary removable drive.
+
+Before an experimental flash, keep the official stock v1.5.0 English HEX from
+the reference archive below available on the computer. That is a vendor
+recovery application, not a dump of the device, its settings, or its bootloader.
+Actual restoration from this diagnostic has not been exercised.
+
+The vendor's update procedure, applied only after those prerequisites:
+
+1. Hold the TS21's A button while connecting a USB data cable. Confirm the iron
+   shows DFU mode and the TS21 update disk appears.
+2. Copy **only `TS21_BRINGUP_NOHEAT.hex`** to that disk's root directory. Do not
+   copy the ELF, a whole build directory, or the stock and diagnostic images
+   together.
+3. Wait for the disk to refresh and the copied file to change from `.hex` to
+   `.rdy`, as specified in the vendor instructions. A copy operation completing
+   is not itself evidence that the bootloader accepted the firmware.
+4. Disconnect and reconnect, keeping the cartridge removed. The expected
+   diagnostic display is `NO HEATING` with GPIO button states underneath.
+   Display orientation/offset and actual execution still need confirmation.
+
+If the display stays blank, the device resets, or the bootloader reports an
+error, stop the diagnostic attempt. Re-enter DFU and use the official stock
+`TS21APPV1.5.0EN.hex` by itself to attempt recovery. An error suffix is not proof
+that the previous application was left intact. If DFU cannot be entered, USB
+file copying is no longer a confirmed recovery route.
 
 ## Memory and startup
 

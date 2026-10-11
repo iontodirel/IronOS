@@ -1,4 +1,5 @@
 .DEFAULT_GOAL := help
+.DELETE_ON_ERROR:
 
 ROOT := $(abspath ../../../..)
 OUT ?= $(ROOT)/source/Objects/TS21-bringup
@@ -13,20 +14,26 @@ CFLAGS := $(ARCH_FLAGS) $(WARNINGS) -std=c11 -Os -g3 -ffreestanding \
           -I. -I$(OUT)
 OBJECTS := $(OUT)/startup.o $(OUT)/main.o $(OUT)/hardware.o $(OUT)/protocol.o
 ELF := $(OUT)/TS21_BRINGUP_NOHEAT.elf
+HEX := $(OUT)/TS21_BRINGUP_NOHEAT.hex
 
-.PHONY: help probe test
+.PHONY: help probe probe-hex test
 help:
 	@echo "Development-only TS21 no-heater diagnostic, NOT an IronOS soldering port."
 	@echo "make probe EXPERIMENTAL=1 CROSS_COMPILE=<toolchain-prefix>"
+	@echo "make probe-hex EXPERIMENTAL=1 CROSS_COMPILE=<toolchain-prefix>"
 	@echo "make test"
-	@echo "Only an ELF is produced; no HEX/DFU images or flashing targets."
+	@echo "HEX export is for cartridge-removed bench testing; no automatic flashing."
 
 ifeq ($(EXPERIMENTAL),1)
 probe: $(ELF)
 	$(PYTHON) tools/inspect_image.py $(ELF)
 	@echo "UNVALIDATED HARDWARE: ELF is for bring-up, not normal soldering."
+
+probe-hex: $(HEX)
+	$(PYTHON) tools/inspect_image.py $(ELF) --hex $(HEX)
+	@echo "UNVALIDATED HARDWARE: remove the cartridge before any diagnostic flash."
 else
-probe:
+probe probe-hex:
 	@echo "Refusing experimental build without EXPERIMENTAL=1. Read README.md."
 	@exit 1
 endif
@@ -53,6 +60,11 @@ $(ELF): $(OBJECTS) ts21.ld Makefile
 		-Wl,--gc-sections,--build-id=none,-Map,$(OUT)/TS21_BRINGUP_NOHEAT.map \
 		-T ts21.ld $(OBJECTS) -lc -lgcc -o $@
 	$(CROSS_COMPILE)size $@
+
+$(HEX): $(ELF) tools/inspect_image.py Makefile
+	$(PYTHON) tools/inspect_image.py $(ELF) > /dev/null
+	$(CROSS_COMPILE)objcopy -O ihex $(ELF) $@
+	$(PYTHON) tools/inspect_image.py $(ELF) --hex $@ > /dev/null
 
 $(OUT)/host-tests: tests/host_tests.c hardware.c protocol.c ts21.h Makefile | $(OUT)
 	$(HOST_CC) $(WARNINGS) -std=c11 -DTS21_HOST_TEST -I. tests/host_tests.c hardware.c protocol.c -o $@

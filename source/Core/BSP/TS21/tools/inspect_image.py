@@ -1,4 +1,4 @@
-"""Check a TS21 diagnostic ELF's layout, not its hardware compatibility."""
+"""Check TS21 diagnostic ELF/HEX contents, not their hardware compatibility."""
 
 import argparse
 import hashlib
@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import struct
 import sys
+from typing import Dict, Optional
 
 
 APP_START = 0x08007000
@@ -23,7 +24,70 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
-def inspect(data: bytes) -> dict:
+def parse_hex(data: bytes) -> Dict[int, int]:
+    """Accept the Intel HEX record types used by the TS21 stock image and objcopy."""
+    lines = data.decode("ascii").replace("\r\n", "\n").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    contents = {}
+    base = 0
+    next_address = APP_START
+    ended = False
+    start_seen = False
+    for number, line in enumerate(lines, 1):
+        require(not ended, "HEX content after EOF")
+        require(
+            len(line) >= 11
+            and len(line) % 2 == 1
+            and line[0] == ":"
+            and all(character in "0123456789abcdefABCDEF" for character in line[1:]),
+            f"Malformed HEX record at line {number}",
+        )
+        record = bytes.fromhex(line[1:])
+        count = record[0]
+        require(len(record) == count + 5, f"HEX byte count mismatch at line {number}")
+        require(sum(record) & 0xFF == 0, f"HEX checksum mismatch at line {number}")
+        address = int.from_bytes(record[1:3], "big")
+        kind = record[3]
+        payload = record[4:-1]
+        if kind == 0:
+            require(count > 0 and address + count <= 0x10000, "Invalid HEX data range")
+            first = base + address
+            require(
+                APP_START <= first and first + count <= FLASH_END,
+                "HEX data overwrites bootloader or persistent settings",
+            )
+            require(first >= next_address, "Overlapping or out-of-order HEX data")
+            contents.update((first + index, byte) for index, byte in enumerate(payload))
+            next_address = first + count
+        elif kind == 1:
+            require(count == 0 and address == 0, "Invalid HEX EOF record")
+            ended = True
+        elif kind == 4:
+            require(count == 2 and address == 0, "Invalid HEX address record")
+            base = int.from_bytes(payload, "big") << 16
+            require(
+                base == APP_START & 0xFFFF0000,
+                "HEX address bank is outside application flash",
+            )
+        elif kind == 5:
+            require(
+                count == 4 and address == 0 and not start_seen,
+                "Invalid HEX start-address record",
+            )
+            require(
+                int.from_bytes(payload, "big") == APP_START,
+                "HEX entry must be 0x08007000",
+            )
+            start_seen = True
+        else:
+            raise ValueError(f"Unsupported HEX record type {kind} at line {number}")
+    require(ended, "Missing HEX EOF record")
+    require(bool(contents), "Missing HEX data")
+    return contents
+
+
+def inspect(data: bytes, hex_data: Optional[bytes] = None) -> dict:
     require(len(data) >= ELF_HEADER.size, "Truncated ELF header")
     header = ELF_HEADER.unpack_from(data)
     (
@@ -139,7 +203,7 @@ def inspect(data: bytes) -> dict:
             f"Invalid interrupt vector {index}",
         )
 
-    return {
+    report = {
         "status": "layout-valid; hardware-unvalidated",
         "entry": f"0x{entry:08X}",
         "reset_handler": f"0x{reset_handler:08X}",
@@ -151,14 +215,32 @@ def inspect(data: bytes) -> dict:
         "stack_reserved_bytes": 2048,
         "sha256": hashlib.sha256(data).hexdigest(),
     }
+    if hex_data is not None:
+        expected = {
+            start + index: byte
+            for start, end, offset in flash_segments
+            for index, byte in enumerate(data[offset : offset + end - start])
+        }
+        contents = parse_hex(hex_data)
+        require(contents == expected, "HEX contents do not match the validated ELF")
+        report["hex_loaded_bytes"] = len(contents)
+        report["hex_sha256"] = hashlib.sha256(hex_data).hexdigest()
+    return report
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("elf", type=Path)
+    parser.add_argument(
+        "--hex",
+        dest="hex_file",
+        type=Path,
+        help="Verify an Intel HEX export against the ELF",
+    )
     args = parser.parse_args()
     try:
-        report = inspect(args.elf.read_bytes())
+        hex_data = args.hex_file.read_bytes() if args.hex_file is not None else None
+        report = inspect(args.elf.read_bytes(), hex_data)
     except (OSError, ValueError, struct.error) as error:
         print(f"TS21 image rejected: {error}", file=sys.stderr)
         return 1

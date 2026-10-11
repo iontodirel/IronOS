@@ -171,5 +171,134 @@ class ImageTests(unittest.TestCase):
         self.assertTrue(generated.isascii())
 
 
+def hex_record(kind, payload=b"", address=0):
+    data = bytes((len(payload), address >> 8, address & 0xFF, kind)) + bytes(payload)
+    return ":" + (data + bytes((-sum(data) & 0xFF,))).hex().upper()
+
+
+class HexImageTests(unittest.TestCase):
+    def setUp(self):
+        self.elf = image()
+        self.payload = self.elf[256:]
+        self.lines = [hex_record(4, b"\x08\x00")]
+        self.lines.extend(
+            hex_record(0, self.payload[offset : offset + 16], 0x7000 + offset)
+            for offset in range(0, len(self.payload), 16)
+        )
+        self.lines.extend(
+            [hex_record(5, inspect_image.APP_START.to_bytes(4, "big")), hex_record(1)]
+        )
+
+    def inspect_hex(self):
+        return inspect_image.inspect(
+            self.elf, ("\n".join(self.lines) + "\n").encode("ascii")
+        )
+
+    def test_matching_hex(self):
+        report = self.inspect_hex()
+        self.assertEqual(report["hex_loaded_bytes"], 272)
+        self.assertEqual(report["status"], "layout-valid; hardware-unvalidated")
+        self.assertEqual(len(report["hex_sha256"]), 64)
+
+    def test_crlf_hex(self):
+        report = inspect_image.inspect(
+            self.elf, ("\r\n".join(self.lines) + "\r\n").encode("ascii")
+        )
+        self.assertEqual(report["hex_loaded_bytes"], 272)
+
+    def test_optional_start_record(self):
+        del self.lines[-2]
+        self.assertEqual(self.inspect_hex()["hex_loaded_bytes"], 272)
+
+    def test_bad_checksum_rejected(self):
+        checksum = int(self.lines[1][-2:], 16) ^ 1
+        self.lines[1] = self.lines[1][:-2] + f"{checksum:02X}"
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            self.inspect_hex()
+
+    def test_wrong_payload_with_valid_checksum_rejected(self):
+        payload = bytearray(self.payload[:16])
+        payload[0] ^= 1
+        self.lines[1] = hex_record(0, payload, 0x7000)
+        with self.assertRaisesRegex(ValueError, "do not match"):
+            self.inspect_hex()
+
+    def test_missing_payload_rejected(self):
+        del self.lines[2]
+        with self.assertRaisesRegex(ValueError, "do not match"):
+            self.inspect_hex()
+
+    def test_extra_payload_rejected(self):
+        self.lines.insert(-2, hex_record(0, b"\x00", 0x7000 + len(self.payload)))
+        with self.assertRaisesRegex(ValueError, "do not match"):
+            self.inspect_hex()
+
+    def test_missing_eof_rejected(self):
+        self.lines.pop()
+        with self.assertRaisesRegex(ValueError, "Missing HEX EOF"):
+            self.inspect_hex()
+
+    def test_content_after_eof_rejected(self):
+        self.lines.append(hex_record(1))
+        with self.assertRaisesRegex(ValueError, "after EOF"):
+            self.inspect_hex()
+
+    def test_overlapping_data_rejected(self):
+        self.lines.insert(2, self.lines[1])
+        with self.assertRaisesRegex(ValueError, "Overlapping"):
+            self.inspect_hex()
+
+    def test_out_of_order_data_rejected(self):
+        self.lines[1], self.lines[2] = self.lines[2], self.lines[1]
+        with self.assertRaisesRegex(ValueError, "out-of-order"):
+            self.inspect_hex()
+
+    def test_reserved_or_wrapping_addresses_rejected(self):
+        for address in (0x6FF0, 0xFC00, 0xFFF8):
+            with self.subTest(address=address), self.assertRaises(ValueError):
+                self.lines[1] = hex_record(0, self.payload[:16], address)
+                self.inspect_hex()
+
+    def test_wrong_entry_rejected(self):
+        self.lines[-2] = hex_record(5, (inspect_image.APP_START + 4).to_bytes(4, "big"))
+        with self.assertRaisesRegex(ValueError, "HEX entry"):
+            self.inspect_hex()
+
+    def test_duplicate_start_rejected(self):
+        self.lines.insert(-1, self.lines[-2])
+        with self.assertRaisesRegex(ValueError, "start-address"):
+            self.inspect_hex()
+
+    def test_malformed_control_records_rejected(self):
+        records = (
+            hex_record(4, b"\x08"),
+            hex_record(4, b"\x08\x00", 1),
+            hex_record(4, b"\x20\x00"),
+            hex_record(5, b"\x08\x00\x70"),
+            hex_record(1, b"\x00"),
+            hex_record(1, address=1),
+            hex_record(2, b"\x08\x00"),
+            hex_record(0, address=0x7000),
+            ":01000001FD",
+        )
+        for record in records:
+            with self.subTest(record=record), self.assertRaises(ValueError):
+                self.lines[0] = record
+                self.inspect_hex()
+
+    def test_malformed_text_rejected(self):
+        for data in (
+            b"",
+            b":",
+            b":0",
+            b":00000001FG\n",
+            b" :00000001FF\n",
+            b":00000001FF \n",
+            b"\xFF",
+        ):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                inspect_image.inspect(self.elf, data)
+
+
 if __name__ == "__main__":
     unittest.main()

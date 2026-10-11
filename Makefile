@@ -99,6 +99,7 @@ list:
 	@echo "  * tests              - run set of checks, linters & tests (equivalent of github CI IronOS project settings for push trigger)"
 	@echo "  * test-ts21          - run host tests for the experimental TS21 diagnostic (no cross compiler needed)"
 	@echo "  * ts21-bringup       - build the unvalidated TS21 no-heater ELF (requires TS21_EXPERIMENTAL=1; see source/Core/BSP/TS21/README.md)"
+	@echo "  * ts21-bringup-hex   - export a checked diagnostic HEX for cartridge-removed bench testing (requires TS21_EXPERIMENTAL=1)"
 	@echo "  * clean-build        - delete generated files & dirs produced during builds EXCEPT docker image & its build cache"
 	@echo "  * clean-full         - delete generated files & dirs produced during builds INCLUDING docker image & its build cache"
 	@echo ""
@@ -199,6 +200,9 @@ test-ts21:
 ts21-bringup:
 	$(MAKE) -C source/Core/BSP/TS21 probe EXPERIMENTAL=$(TS21_EXPERIMENTAL)
 
+ts21-bringup-hex:
+	$(MAKE) -C source/Core/BSP/TS21 probe-hex EXPERIMENTAL=$(TS21_EXPERIMENTAL)
+
 # former scripts/ci/buildAll.sh - all in one to build all firmware & place the produced binaries into one output directory
 build-all:
 	@mkdir  -p  $(OUT_DIR)
@@ -258,5 +262,5 @@ clean-full: clean-build  docker-clean
 .PHONY:  docker-check  docker-shell  docker-build  docker-clean-image  docker-clean-cache  docker-clean
 .PHONY:  docs  docs-deploy
 .PHONY:  test-md  test-sh  test-py  test-ccpp  test-ts21  tests
-.PHONY:  build-all  build-multilang  ci  ts21-bringup
+.PHONY:  build-all  build-multilang  ci  ts21-bringup  ts21-bringup-hex
 .PHONY:  clean-build  clean-full
