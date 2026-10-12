@@ -34,6 +34,7 @@ parser.add_argument(
         "stall",
         "session",
         "no-rise",
+        "uart",
     ),
 )
 args = parser.parse_args()
@@ -203,6 +204,9 @@ class Board:
     def ram_value(self, name, size=4):
         return int.from_bytes(cpu.mem_read(symbols[name], size), "little")
 
+    def status_errors(self):
+        return int.from_bytes(cpu.mem_read(symbols["ts21_status"] + 4, 4), "little")
+
     def update_gate(self):
         if self.gate_started is None or not self.registers.get(0x40012C00, 0) & 1:
             return
@@ -265,6 +269,9 @@ class Board:
         if self.injected:
             self.stop("FAIL: heater rearmed after an injected fault")
             return
+        if args.check_heater == "uart" and not self.status_errors() & (1 << 4):
+            self.stop("FAIL: passive UART receive error was not retained for diagnosis")
+            return
         self.heater_commands += 1
         print(
             f"{self.micros():8d} us heater command {self.heater_commands}: "
@@ -273,7 +280,7 @@ class Board:
         )
         if self.heater_commands == 3:
             self.injected = True
-            if args.check_heater == "short":
+            if args.check_heater in ("short", "uart"):
                 self.probe_delta = 0
             elif args.check_heater == "open":
                 self.probe_delta = 4095 - self.tip_adc
@@ -317,6 +324,12 @@ class Board:
             self.idle_check_started = True
         if mode == 0 and not self.heater_commands:
             self.home_draws += 1
+            if args.check_heater == "uart" and self.home_draws == 1:
+                self.registers[0x40004400] = 8
+                print(
+                    "Injecting a passive UART receive overrun with a valid tip",
+                    flush=True,
+                )
             if self.home_draws == 3:
                 if args.check_heater == "startup":
                     self.stop(
@@ -325,6 +338,15 @@ class Board:
                     return
                 self.button_started = self.micros()
                 print("Pressing/releasing the physical bottom button", flush=True)
+            if (
+                args.check_heater == "uart"
+                and self.button_started is not None
+                and self.micros() - self.button_started > 600000
+            ):
+                self.stop(
+                    "FAIL: passive UART error marks a valid tip disconnected and blocks soldering"
+                )
+                return
         if self.injected and mode == 9:
             errors = {
                 "short": 1 << 9,
@@ -333,10 +355,9 @@ class Board:
                 "overtemp": 1 << 12,
                 "session": 1 << 11,
                 "no-rise": 1 << 13,
+                "uart": 1 << 9,
             }
-            error = int.from_bytes(
-                cpu.mem_read(symbols["ts21_status"] + 4, 4), "little"
-            )
+            error = self.status_errors()
             if (
                 error & errors[args.check_heater]
                 and not self.gate_high()
@@ -345,8 +366,13 @@ class Board:
             ):
                 self.fault_draws += 1
                 if self.fault_draws >= 2:
+                    fault = (
+                        "short after a passive UART receive error"
+                        if args.check_heater == "uart"
+                        else args.check_heater
+                    )
                     self.stop(
-                        f"PASS: {args.check_heater} fault latched, heater off, "
+                        f"PASS: {fault} fault latched, heater off, "
                         "normal IronOS protection warning displayed"
                     )
 
@@ -496,6 +522,8 @@ class Board:
                 self.registers[0x4001244C] = 1024
             result &= ~12
             self.registers[address] = result
+        elif address == 0x40004404:
+            self.registers[0x40004400] = 0
         elif address == 0xE000F008:
             result = self.now() & 0xFFFFFFFF
         elif address == 0xE000F00C:
@@ -618,7 +646,7 @@ print(
 )
 print("recent PCs: " + " ".join(f"{pc:08x}" for pc in board.recent), flush=True)
 if args.check_heater:
-    errors = int.from_bytes(cpu.mem_read(symbols["ts21_status"] + 4, 4), "little")
+    errors = board.status_errors()
     print(
         f"heater_commands={board.heater_commands}, errors={errors:#x}, "
         f"mode={board.ram_value('currentOperatingMode', 1)}, "

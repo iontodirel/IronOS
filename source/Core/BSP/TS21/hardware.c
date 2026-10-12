@@ -97,7 +97,7 @@ static void heater_trip(uint32_t error) {
 void ts21_heater_check(void) {
   const uint32_t state = irq_save();
   const uint32_t now   = ts21_micros();
-  if (heater_active && (ts21_status.errors || !ts21_heater_permitted())) {
+  if (heater_active && ((ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS) || !ts21_heater_permitted())) {
     ts21_heater_inhibit();
   }
   if (heater_session_started && !(ts21_status.errors & TS21_ERROR_HEATER_TIMEOUT) && (uint32_t)(now - heater_session_us) >= TS21_HEATER_SESSION_US) {
@@ -161,7 +161,7 @@ void setTipPWM(uint8_t pulse, bool fast) {
     irq_restore(state);
     return;
   }
-  if (ts21_status.errors || heater_sample_error || !ready || (uint32_t)(now - heater_sample_us) > TS21_HEATER_FRESH_US) {
+  if ((ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS) || heater_sample_error || !ready || (uint32_t)(now - heater_sample_us) > TS21_HEATER_FRESH_US) {
     heater_trip(heater_sample_error ? heater_sample_error : TS21_ERROR_HEATER_STALE);
     irq_restore(state);
     return;

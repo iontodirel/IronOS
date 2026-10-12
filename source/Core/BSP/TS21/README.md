@@ -29,6 +29,22 @@ hardware current regulator, or protection against a failed-short power device.
 No active USB-PD request is sent, and passive UART telemetry is not treated as
 proof of a power contract.
 
+The first heater image incorrectly treated every recorded error, including a
+passive UART receive overrun, as a disconnected tip. A receive overrun with
+valid sensor values reproduces that false indication and prevents entering
+soldering mode. UART reception errors now remain recorded for diagnosis but
+do not veto tip connection or heating: neither the power calculation nor
+heater permission depends on those receive-only packets. Every other error
+bit remains inhibiting, including unknown bits, and all sensor/resistance
+limits are unchanged. This identifies a reproducible firmware bug, not proof
+that UART caused the reported physical device's indication.
+
+If the indication persists, inspect the existing debug menu without heating:
+hold the top button from home, use the bottom button to cycle through input
+voltage, tip/handle temperature and tip resistance, and use a short top press
+to exit. Do not lower resistance limits or bypass invalid samples to force
+the soldering screen open.
+
 On each boot it starts unarmed at the normal home screen. Saved autostart,
 boost and power-bank keepalive are overridden in RAM, and the setpoint is
 limited to 80 C (176 F). A bottom-button press/release from home is required
@@ -106,7 +122,7 @@ python3 source/Core/BSP/TS21/tools/emulate_boot.py \
   --check-heater short --instructions 160000000
 ```
 
-Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `no-rise` and `session`, and
+Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `no-rise`, `session` and `uart`, and
 exercise both interrupt-inherited and reset-context entry. It seeds saved
 autostart/boost/keepalive, verifies unarmed startup, presses/releases the real
 bottom GPIO input, and requires bounded nonzero output before fault injection.
@@ -114,6 +130,12 @@ It also ages the cold soldering screen's inactivity timestamps and rejects
 display blanking in this bench variant.
 Fault runs require output inhibition and the ordinary protection-warning UI;
 the stall run advances only the timer model after CPU execution is stopped.
+The `uart` run injects a receive overrun before the home-screen button action,
+requires the diagnostic error to stay recorded while a valid tip can heat
+within the existing bounds, and then requires a short-circuit fault to stop
+output normally. Native checks cover all four UART receive-error flags and
+ensure every other error bit still inhibits output, including when combined
+with a UART error.
 No-rise/session runs age the session timestamp without skipping scheduler
 execution; they are not five/ten-second hardware endurance tests.
 Compressed font buffers are compared byte-for-byte against host decompression.

@@ -177,7 +177,7 @@ bool     isTipShorted() {
 bool isTipDisconnected() {
 #ifdef TS21_HEATER_TEST
   const uint8_t resistance = getTipResistanceX10();
-  if (ts21_status.errors || resistance < TS21_HEATER_MIN_R_X10 || resistance > TS21_HEATER_MAX_R_X10) {
+  if ((ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS) || resistance < TS21_HEATER_MIN_R_X10 || resistance > TS21_HEATER_MAX_R_X10) {
     return true;
   }
 #endif

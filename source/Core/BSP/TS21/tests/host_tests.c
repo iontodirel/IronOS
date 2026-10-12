@@ -803,6 +803,44 @@ static void test_heater_faults(void) {
   ts21_heater_check();
   assert(heater_failures == failures);
 }
+
+static void test_passive_uart_heater(void) {
+  for (uint32_t fault = 1; fault <= 8; fault <<= 1) {
+    prepare_heater();
+    sample_heater();
+    uart_error = fault;
+    ts21_uart_poll();
+    assert(ts21_status.errors == TS21_ERROR_UART);
+    append_frame(20, 1);
+    ts21_uart_poll();
+    assert(ts21_status.pd_frames == 1);
+    setTipPWM(255, false);
+    assert(getTipX10Watts() > 0 && heater_failures == 0);
+    ts21_heater_check();
+    assert(getTipX10Watts() > 0);
+    assert(ts21_status.errors == TS21_ERROR_UART);
+  }
+
+  for (unsigned bit = 0; bit < 32; ++bit) {
+    const uint32_t error = UINT32_C(1) << bit;
+    if (error == TS21_ERROR_UART) {
+      continue;
+    }
+    prepare_heater();
+    sample_heater();
+    ts21_status.errors = TS21_ERROR_UART;
+    setTipPWM(255, false);
+    assert(getTipX10Watts() > 0);
+    ts21_status.errors |= error;
+    ts21_heater_check();
+    assert_heater_off();
+    sample_heater();
+    setTipPWM(255, false);
+    assert_heater_off();
+    assert(ts21_status.errors & error);
+    assert(ts21_status.errors & TS21_ERROR_UART);
+  }
+}
 #endif
 
 int main(void) {
@@ -819,6 +857,7 @@ int main(void) {
 #ifdef TS21_HEATER_TEST
   test_bounded_heater();
   test_heater_faults();
+  test_passive_uart_heater();
   puts("TS21 heater tests passed: measured resistance, power cap, finite hardware gate, freshness, faults and session limits");
 #endif
   puts("TS21 host tests passed: protocol, inhibit ordering, button mapping, clocks, ADC, UART, I2C and bounded failures");

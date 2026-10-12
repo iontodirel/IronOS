@@ -69,6 +69,11 @@ enum TS21Error {
   TS21_ERROR_HEATER_OPEN    = 1U << 15,
 };
 
+#ifdef TS21_HEATER_TEST
+// Passive UART telemetry is not a heater input; retain its diagnostic flag without inhibiting output.
+#define TS21_HEATER_INHIBIT_ERRORS (UINT32_MAX ^ TS21_ERROR_UART)
+#endif
+
 struct TS21PDParser {
   uint8_t bytes[4];
   uint8_t used;
