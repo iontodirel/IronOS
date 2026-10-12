@@ -64,7 +64,7 @@ void flash_save_buffer(const uint8_t *buffer, const uint16_t length) {
   }
   // A settings erase/program can outlast one tick; resume from the live timebase.
   if (SysTick->CTLR & 2) {
-    SysTick->CMP = ts21_timer_now() + 1000;
+    SysTick->CMP = ts21_timer_now() + TS21_TIMER_HZ / configTICK_RATE_HZ;
     SysTick->SR  = 0;
   }
   __asm volatile("csrw mstatus, %0" ::"r"(state) : "memory");

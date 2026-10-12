@@ -1,5 +1,6 @@
 #include "Font.h"
 #include "OLED.hpp"
+#include "OperatingModes.h"
 #include "Settings.h"
 #include "power.hpp"
 #include <algorithm>
@@ -11,6 +12,8 @@
 const uint16_t  powerPWM = 255;
 uint16_t        totalPWM = 255;
 static unsigned calls;
+static uint8_t    buttons;
+static TickType_t ticks;
 
 void setTipPWM(uint8_t pulse, bool) {
   assert(pulse == 0);
@@ -21,6 +24,49 @@ uint8_t  getTipResistanceX10() { return 20; }
 uint16_t getSettingValue(SettingsOptions) { return VOLTAGE_DIV; }
 
 void vTaskDelay(TickType_t) {}
+TickType_t xTaskGetTickCount() { return ticks; }
+uint8_t    getButtonA() { return (buttons & 1) != 0; }
+uint8_t    getButtonB() { return (buttons & 2) != 0; }
+bool       isTipDisconnected() { return false; }
+
+OperatingMode handleHomeButtons(ButtonState state, guiContext *context);
+
+static void testButtonActions() {
+  static_assert(configTICK_RATE_HZ == 1000, "Keep menu and long-press timing in milliseconds");
+  assert(getButtonState() == BUTTON_NONE);
+  guiContext context{};
+  assert(handleHomeButtons(BUTTON_NONE, &context) == OperatingMode::HomeScreen);
+  buttons = 2;
+  assert(getButtonState() == BUTTON_NONE);
+  ticks += 120;
+  assert(getButtonState() == BUTTON_NONE);
+  buttons               = 0;
+  const ButtonState top = getButtonState();
+  assert(top == BUTTON_B_SHORT);
+  assert(handleHomeButtons(top, &context) == OperatingMode::SettingsMenu);
+  assert(getButtonState() == BUTTON_NONE);
+  buttons = 1;
+  assert(getButtonState() == BUTTON_NONE);
+  ticks += 120;
+  buttons                  = 0;
+  const ButtonState bottom = getButtonState();
+  assert(bottom == BUTTON_F_SHORT);
+  assert(handleHomeButtons(bottom, &context) == OperatingMode::Soldering);
+  buttons = 2;
+  assert(getButtonState() == BUTTON_NONE);
+  ticks += 399;
+  assert(getButtonState() == BUTTON_NONE);
+  ++ticks;
+  assert(getButtonState() == BUTTON_B_LONG);
+  buttons = 0;
+  assert(getButtonState() == BUTTON_NONE);
+  buttons = 3;
+  assert(getButtonState() == BUTTON_NONE);
+  ticks += 120;
+  buttons = 0;
+  assert(getButtonState() == BUTTON_BOTH);
+  assert(getButtonState() == BUTTON_NONE);
+}
 
 static std::vector<uint8_t>                           oledCommands;
 static std::array<std::array<uint8_t, OLED_WIDTH>, 4> oledPages;
@@ -108,5 +154,6 @@ int main() {
     }
   }
   testOLEDMapping();
-  puts("TS21 IronOS tests passed: heater lockout, asset rotation, stock OLED offsets, and all 128x32 pixels in both orientations");
+  testButtonActions();
+  puts("TS21 IronOS tests passed: heater lockout, display mapping, complete 128x32 frames, menu button actions and press timing");
 }

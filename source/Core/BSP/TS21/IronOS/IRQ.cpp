@@ -3,21 +3,21 @@
 #include "main.hpp"
 
 extern "C" void vPortSetupTimerInterrupt(void) {
-  // Keep the pre-RTOS 1 MHz free-running clock used by the bounded I2C/ADC delays.
+  // Keep the pre-RTOS free-running clock used by the bounded I2C/ADC delays.
   NVIC_SetPriority(Software_IRQn, 0xF0);
   NVIC_SetPriority(SysTicK_IRQn, 0xF0);
   SysTick->SR   = 0;
-  SysTick->CMP  = ts21_timer_now() + 1000;
+  SysTick->CMP  = ts21_timer_now() + TS21_TIMER_HZ / configTICK_RATE_HZ;
   SysTick->CTLR = 3;
 }
 
 extern "C" void ts21_tick_reload(void) {
   SysTick->SR         = 0;
-  uint64_t       next = SysTick->CMP + 1000;
+  uint64_t       next = SysTick->CMP + TS21_TIMER_HZ / configTICK_RATE_HZ;
   const uint64_t now  = ts21_timer_now();
-  // Allow time to write both compare halves at the 8 MHz core clock.
-  if (next <= now + 100) {
-    next = now + 1000;
+  // Leave 100 us to write both compare halves before the deadline.
+  if (next <= now + 100 * TS21_TIMER_TICKS_PER_US) {
+    next = now + TS21_TIMER_HZ / configTICK_RATE_HZ;
   }
   SysTick->CMP = next;
 }

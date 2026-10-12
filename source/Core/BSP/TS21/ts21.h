@@ -17,7 +17,15 @@ extern "C" {
 #define TS21_USART2    UINT32_C(0x40004400)
 #define TS21_IWDG      UINT32_C(0x40003000)
 #define TS21_SYSTICK   UINT32_C(0xE000F000)
-#define TS21_CLOCK_HZ  UINT32_C(8000000)
+#ifdef TS21_IRONOS
+#define TS21_CLOCK_HZ UINT32_C(64000000)
+#define TS21_APB1_HZ  (TS21_CLOCK_HZ / 2)
+#else
+#define TS21_CLOCK_HZ UINT32_C(8000000)
+#define TS21_APB1_HZ  TS21_CLOCK_HZ
+#endif
+#define TS21_TIMER_HZ           (TS21_CLOCK_HZ / 8)
+#define TS21_TIMER_TICKS_PER_US (TS21_TIMER_HZ / 1000000)
 #define TS21_HEATER_EN (UINT32_C(1) << 10)
 #define TS21_HEATER_IN (UINT32_C(1) << 6)
 #define TS21_SCL       (UINT32_C(1) << 10)
@@ -76,6 +84,7 @@ void     ts21_heater_inhibit(void);
 void     setTipPWM(uint8_t pulse, bool fast);
 void     ts21_watchdog_refresh(void);
 bool     ts21_board_init(void);
+uint64_t ts21_timer_now(void);
 uint32_t ts21_micros(void);
 bool     ts21_delay_us(uint32_t duration);
 uint8_t  ts21_buttons(void);

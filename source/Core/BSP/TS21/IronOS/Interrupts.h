@@ -1,7 +1,7 @@
 #ifndef TS21_INTERRUPTS_H
 #define TS21_INTERRUPTS_H
 
-#include <stdint.h>
+#include "ts21.h"
 
 enum { SysTicK_IRQn = 12, Software_IRQn = 14 };
 
@@ -13,16 +13,6 @@ typedef struct {
 } TS21SysTick;
 
 #define SysTick ((TS21SysTick *)0xE000F000)
-
-static inline uint64_t ts21_timer_now(void) {
-  const volatile uint32_t *counter = (const volatile uint32_t *)&SysTick->CNT;
-  uint32_t                 high, low;
-  do {
-    high = counter[1];
-    low  = counter[0];
-  } while (high != counter[1]);
-  return ((uint64_t)high << 32) | low;
-}
 
 static inline void NVIC_EnableIRQ(unsigned irq) { ((volatile uint32_t *)0xE000E100)[irq / 32] = 1U << (irq % 32); }
 static inline void NVIC_SetPendingIRQ(unsigned irq) { ((volatile uint32_t *)0xE000E200)[irq / 32] = 1U << (irq % 32); }

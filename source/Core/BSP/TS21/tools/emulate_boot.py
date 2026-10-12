@@ -19,7 +19,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("elf", type=Path)
 parser.add_argument("--prefix", required=True)
 parser.add_argument("--inherited-interrupt", action="store_true")
-parser.add_argument("--instructions", type=int, default=4000000)
+parser.add_argument("--instructions", type=int, default=20000000)
+parser.add_argument("--max-frame-us", type=int)
 args = parser.parse_args()
 
 symbols = {}
@@ -67,6 +68,9 @@ class Board:
         self.i2c_byte = 0
         self.i2c_packet = []
         self.display_bytes = 0
+        self.frame_start = None
+        self.frame_bytes = 0
+        self.frames_us = []
         self.interrupts = {12: 0, 14: 0}
         self.last_watchdog = 0
         self.result = None
@@ -111,6 +115,19 @@ class Board:
             return self.counter + (self.steps - self.counter_origin) // 8
         return self.counter
 
+    def core_hz(self):
+        clock = self.registers.get(0x40021004, 0)
+        if clock & 12 == 8:
+            multiplier = (clock >> 18 & 15) + 2
+            if multiplier == 17:
+                multiplier = 18
+            source = 8000000 if self.registers.get(0x40023800, 0) & 0x10 else 4000000
+            return source * multiplier
+        return 8000000
+
+    def micros(self):
+        return self.now() * 8000000 // self.core_hz()
+
     def stop(self, reason):
         self.result = reason
         cpu.emu_stop()
@@ -121,7 +138,7 @@ class Board:
         if pc in self.trace and pc not in self.seen:
             self.seen.add(pc)
             print(
-                f"{self.now():8d} us {self.trace[pc]} sp={uc.reg_read(UC_RISCV_REG_X0 + 2):08x}",
+                f"{self.micros():8d} us {self.trace[pc]} sp={uc.reg_read(UC_RISCV_REG_X0 + 2):08x}",
                 flush=True,
             )
         if pc == symbols.get("ts21_fault"):
@@ -183,19 +200,28 @@ class Board:
                     )
                     return
         if (
-            self.display_bytes >= 2 * 512
+            len(self.frames_us) >= 2
             and self.interrupts[12] >= 100
             and self.interrupts[14]
             and self.required_tasks <= self.seen
         ):
-            self.stop(
-                "PASS: all four tasks, two full display frames and 100 timer interrupts"
-            )
+            if (
+                args.max_frame_us is not None
+                and max(self.frames_us) > args.max_frame_us
+            ):
+                self.stop(f"FAIL: simulated frame exceeds {args.max_frame_us} us")
+            else:
+                self.stop(
+                    "PASS: all four tasks, two full display frames and 100 timer interrupts"
+                )
 
     def read(self, uc, access, address, size, value, unused):
         result = self.registers.get(address, 0)
         if address == 0x40021000:
-            result |= 2
+            result = (result & ~(1 << 25)) | ((result & (1 << 24)) << 1) | 2
+        elif address == 0x40021004:
+            result = (result & ~12) | ((result & 3) << 2)
+            self.registers[address] = result
         elif address == 0x40010808:
             result = (1 << 5) | (1 << 7)
         elif address == 0x40010C08:
@@ -231,8 +257,16 @@ class Board:
                         self.i2c_packet = []
                     elif not old & sda and new & sda:
                         self.i2c_active = False
+                        if self.i2c_packet == [0x78, 0x00, 0xB0]:
+                            self.frame_start = self.micros()
+                            self.frame_bytes = 0
                         if self.i2c_packet[:2] == [0x78, 0x40]:
-                            self.display_bytes += len(self.i2c_packet) - 2
+                            count = len(self.i2c_packet) - 2
+                            self.display_bytes += count
+                            self.frame_bytes += count
+                            if self.frame_start is not None and self.frame_bytes == 512:
+                                self.frames_us.append(self.micros() - self.frame_start)
+                                self.frame_start = None
                 if self.i2c_active and not old & scl and new & scl:
                     self.i2c_pulses += 1
                     if self.i2c_pulses % 9:
@@ -266,7 +300,7 @@ class Board:
             )
             self.counter_origin = self.steps
         elif address == 0x40003000:
-            self.last_watchdog = self.now()
+            self.last_watchdog = self.micros()
         elif address == 0xE000E048 and value == 0xBEEF0080:
             self.stop("FAIL: firmware requested reset")
 
@@ -282,8 +316,9 @@ except UcError as error:
     board.result = f"EMULATION ERROR: {error}, PC={cpu.reg_read(UC_RISCV_REG_PC):08x}"
 print(board.result or "FAIL: instruction budget exhausted", flush=True)
 print(
-    f"steps={board.steps}, us={board.now()}, IRQ={board.interrupts}, display_bytes={board.display_bytes}, "
-    f"watchdog_gap_us={board.now() - board.last_watchdog}, CSRs={board.csr}",
+    f"steps={board.steps}, us={board.micros()}, core_hz={board.core_hz()}, "
+    f"IRQ={board.interrupts}, display_bytes={board.display_bytes}, frame_us={board.frames_us}, "
+    f"watchdog_gap_us={board.micros() - board.last_watchdog}, CSRs={board.csr}",
     flush=True,
 )
 print("recent PCs: " + " ".join(f"{pc:08x}" for pc in board.recent), flush=True)

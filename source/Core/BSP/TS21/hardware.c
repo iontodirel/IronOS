@@ -49,16 +49,31 @@ void setTipPWM(uint8_t pulse, bool fast) {
   ts21_heater_inhibit();
 }
 
-uint32_t ts21_micros(void) { return ts21_mmio_read(TS21_SYSTICK + 8); }
+uint64_t ts21_timer_now(void) {
+  uint32_t high, low;
+  do {
+    high = ts21_mmio_read(TS21_SYSTICK + 12);
+    low  = ts21_mmio_read(TS21_SYSTICK + 8);
+  } while (high != ts21_mmio_read(TS21_SYSTICK + 12));
+  return ((uint64_t)high << 32) | low;
+}
+
+uint32_t ts21_micros(void) {
+#if TS21_TIMER_TICKS_PER_US == 1
+  return ts21_mmio_read(TS21_SYSTICK + 8);
+#else
+  return (uint32_t)(ts21_timer_now() / TS21_TIMER_TICKS_PER_US);
+#endif
+}
 
 bool ts21_delay_us(uint32_t duration) {
   if (duration > 100000) {
     ts21_status.errors |= TS21_ERROR_ARGUMENT;
     return false;
   }
-  const uint32_t start     = ts21_micros();
+  const uint32_t start     = ts21_mmio_read(TS21_SYSTICK + 8);
   uint32_t       remaining = duration * 16 + 128;
-  while ((uint32_t)(ts21_micros() - start) < duration) {
+  while ((uint32_t)(ts21_mmio_read(TS21_SYSTICK + 8) - start) < duration * TS21_TIMER_TICKS_PER_US) {
     if (!remaining--) {
       ts21_status.errors |= TS21_ERROR_CLOCK;
       return false;
@@ -77,16 +92,32 @@ static bool clock_init(void) {
   if (!wait_bits(TS21_RCC + 4, 12, 0)) {
     return false;
   }
-  // The diagnostic needs neither PLL nor high-voltage power negotiation.
-  modify(TS21_RCC + 4, 0xFFF0, 0);
   modify(TS21_RCC, UINT32_C(1) << 24, 0);
+  if (!wait_bits(TS21_RCC, UINT32_C(1) << 25, 0)) {
+    return false;
+  }
+#ifdef TS21_IRONOS
+  // WCH HSI x8: HCLK 64 MHz, APB1 32 MHz, APB2 64 MHz, ADC 8 MHz.
+  modify(0x40023800, 0, 0x10);
+  modify(TS21_RCC + 4, 0x3FFFF0, 0x18C400);
+  modify(TS21_RCC, 0, UINT32_C(1) << 24);
+  if (!wait_bits(TS21_RCC, UINT32_C(1) << 25, UINT32_C(1) << 25)) {
+    return false;
+  }
+  modify(TS21_RCC + 4, 3, 2);
+  if (!wait_bits(TS21_RCC + 4, 12, 8)) {
+    return false;
+  }
+#else
+  modify(TS21_RCC + 4, 0xFFF0, 0);
+#endif
   ts21_mmio_write(TS21_SYSTICK, 0);
   ts21_mmio_write(TS21_SYSTICK + 4, 0);
   ts21_mmio_write(TS21_SYSTICK + 8, 0);
   ts21_mmio_write(TS21_SYSTICK + 12, 0);
   ts21_mmio_write(TS21_SYSTICK + 16, UINT32_MAX);
   ts21_mmio_write(TS21_SYSTICK + 20, UINT32_MAX);
-  ts21_mmio_write(TS21_SYSTICK, 1); // HCLK/8 = 1 MHz; no interrupts.
+  ts21_mmio_write(TS21_SYSTICK, 1); // Free-running HCLK/8; no interrupts yet.
   return true;
 }
 
@@ -96,7 +127,7 @@ static void uart_init(void) {
   ts21_mmio_write(TS21_USART2 + 12, 0);
   ts21_mmio_write(TS21_USART2 + 16, 0);
   ts21_mmio_write(TS21_USART2 + 20, 0);
-  ts21_mmio_write(TS21_USART2 + 8, (TS21_CLOCK_HZ + 4800) / 9600);
+  ts21_mmio_write(TS21_USART2 + 8, (TS21_APB1_HZ + 4800) / 9600);
   ts21_mmio_write(TS21_USART2 + 12, 0x2004); // UE + RE only. Never enable TX.
   pd_parser.used = 0;
   uart_ready     = true;
@@ -129,12 +160,12 @@ static void uart_poll(void) {
 }
 
 void ts21_uart_poll(void) {
-#ifdef TS21_IRONOS
+#if defined(TS21_IRONOS) && !defined(TS21_HOST_TEST)
   uint32_t state;
   __asm volatile("csrrci %0, mstatus, 8" : "=r"(state)::"memory");
 #endif
   uart_poll();
-#ifdef TS21_IRONOS
+#if defined(TS21_IRONOS) && !defined(TS21_HOST_TEST)
   __asm volatile("csrw mstatus, %0" ::"r"(state) : "memory");
 #endif
 }
@@ -239,7 +270,11 @@ bool ts21_sample_sensors(struct TS21Sample *sample) {
 
 uint8_t ts21_buttons(void) {
   const uint32_t pins = ts21_mmio_read(TS21_GPIOA + 8);
+#ifdef TS21_IRONOS
+  return (uint8_t)(((pins & (1U << 7)) ? 0U : 1U) | ((pins & (1U << 5)) ? 0U : 2U));
+#else
   return (uint8_t)(((pins & (1U << 5)) ? 0U : 1U) | ((pins & (1U << 7)) ? 0U : 2U));
+#endif
 }
 
 static void scl_low(void) { ts21_mmio_write(TS21_GPIOB + 0x14, TS21_SCL); }
@@ -284,20 +319,25 @@ static bool i2c_start(void) {
 }
 
 static bool i2c_byte(uint8_t value) {
+#ifdef TS21_IRONOS
+  const uint32_t half_period_us = 2;
+#else
+  const uint32_t half_period_us = 4;
+#endif
   for (unsigned bit = 0; bit < 8; ++bit) {
     if (value & 0x80U) {
       sda_release();
     } else {
       sda_low();
     }
-    if (!ts21_delay_us(4) || !scl_release() || !ts21_delay_us(4)) {
+    if (!ts21_delay_us(half_period_us) || !scl_release() || !ts21_delay_us(half_period_us)) {
       return false;
     }
     scl_low();
     value = (uint8_t)(value << 1);
   }
   sda_release();
-  if (!ts21_delay_us(4) || !scl_release() || !ts21_delay_us(4)) {
+  if (!ts21_delay_us(half_period_us) || !scl_release() || !ts21_delay_us(half_period_us)) {
     return false;
   }
   const bool acknowledged = !(ts21_mmio_read(TS21_GPIOB + 8) & TS21_SDA);

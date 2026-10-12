@@ -14,9 +14,13 @@ static struct Register registers[128];
 static struct Register writes[4096];
 static unsigned        register_count;
 static unsigned        write_count;
-static uint32_t        ticks;
+static uint64_t        ticks;
 static bool            clock_ready;
 static bool            clock_running;
+static bool            hsi_selected;
+static bool            pll_ready;
+static bool            pll_selected;
+static bool            pll_stuck;
 static bool            calibration_complete;
 static bool            conversion_complete;
 static uint32_t        input_a;
@@ -25,6 +29,8 @@ static bool            sda_stuck;
 static bool            acknowledge;
 static bool            i2c_active;
 static unsigned        i2c_pulses;
+static uint64_t        i2c_rise;
+static uint64_t        i2c_fall;
 static uint8_t         i2c_byte;
 static uint8_t         i2c_bytes[130];
 static unsigned        i2c_count;
@@ -48,13 +54,30 @@ static uint32_t *reg(uint32_t address) {
 
 uint32_t ts21_mmio_read(uint32_t address) {
   if (address == TS21_RCC) {
-    return clock_ready ? (*reg(address) | 2U) : (*reg(address) & ~2U);
+    uint32_t result = *reg(address) & ~(2U | (1U << 25));
+    if (clock_ready) {
+      result |= 2U;
+    }
+    if (pll_stuck || (pll_ready && (result & (1U << 24)))) {
+      result |= 1U << 25;
+    }
+    return result;
+  }
+  if (address == TS21_RCC + 4) {
+    const uint32_t requested = *reg(address) & 3;
+    if ((requested == 0 && hsi_selected) || (requested == 2 && pll_selected)) {
+      *reg(address) = (*reg(address) & ~12U) | (requested << 2);
+    }
+    return *reg(address);
   }
   if (address == TS21_SYSTICK + 8) {
     if (clock_running && (*reg(TS21_SYSTICK) & 1U)) {
-      ++ticks;
+      ticks += TS21_TIMER_TICKS_PER_US;
     }
-    return ticks;
+    return (uint32_t)ticks;
+  }
+  if (address == TS21_SYSTICK + 12) {
+    return (uint32_t)(ticks >> 32);
   }
   if (address == TS21_ADC1 + 8 && calibration_complete) {
     if (*reg(address) & 4U) {
@@ -106,7 +129,15 @@ void ts21_mmio_write(uint32_t address, uint32_t value) {
         i2c_active = false;
       }
     }
+    if (i2c_active && (old & TS21_SCL) && !(next & TS21_SCL)) {
+      if (i2c_pulses) {
+        assert(ticks - i2c_rise >= 2 * TS21_TIMER_TICKS_PER_US);
+      }
+      i2c_fall = ticks;
+    }
     if (i2c_active && !(old & TS21_SCL) && (next & TS21_SCL)) {
+      assert(ticks - i2c_fall >= 2 * TS21_TIMER_TICKS_PER_US);
+      i2c_rise = ticks;
       ++i2c_pulses;
       if (i2c_pulses % 9) {
         i2c_byte = (uint8_t)((i2c_byte << 1) | ((next & TS21_SDA) ? 1U : 0U));
@@ -119,6 +150,8 @@ void ts21_mmio_write(uint32_t address, uint32_t value) {
   } else if (address == TS21_ADC1 + 8 && (value & 0x400000U) && conversion_complete) {
     *reg(TS21_ADC1) |= 2;
     *reg(TS21_ADC1 + 0x4C) = adc_value;
+  } else if (address == TS21_SYSTICK + 8 || address == TS21_SYSTICK + 12) {
+    ticks = ((uint64_t)*reg(TS21_SYSTICK + 12) << 32) | *reg(TS21_SYSTICK + 8);
   }
 }
 
@@ -129,10 +162,13 @@ static void reset(void) {
   register_count = write_count = 0;
   ticks                        = 0;
   clock_ready = clock_running = calibration_complete = conversion_complete = true;
+  hsi_selected = pll_ready = pll_selected                                  = true;
+  pll_stuck                                                                = false;
   input_a                                                                  = (1U << 5) | (1U << 7);
   scl_stuck = sda_stuck = i2c_active = false;
   acknowledge                        = true;
   i2c_pulses = i2c_count = 0;
+  i2c_rise = i2c_fall = 0;
   uart_size = uart_position = 0;
   uart_error                = 0;
   adc_value                 = 0xFABC;
@@ -227,13 +263,18 @@ static void test_startup_and_inputs(void) {
     }
   }
   assert(clear_index && mode_index && clear_index < mode_index);
+#ifdef TS21_IRONOS
+  const uint8_t top = 2; // Top button: IronOS B / settings.
+#else
+  const uint8_t top = 1; // Preserve the standalone diagnostic's raw GPIO labels.
+#endif
   assert(ts21_buttons() == 0);
   input_a &= ~(1U << 5);
-  assert(ts21_buttons() == 1);
+  assert(ts21_buttons() == top);
   input_a &= ~(1U << 7);
   assert(ts21_buttons() == 3);
   input_a |= 1U << 5;
-  assert(ts21_buttons() == 2);
+  assert(ts21_buttons() == (top ^ 3));
   const uint8_t channels[] = {1, 2, 4, 9};
   for (unsigned i = 0; i < sizeof(channels); ++i) {
     uint16_t sample = 0;
@@ -246,6 +287,56 @@ static void test_startup_and_inputs(void) {
   assert(unchanged == 0xBEEF);
   assert(ts21_status.errors & TS21_ERROR_ARGUMENT);
   require_inhibited();
+}
+
+static void test_clocks(void) {
+  reset();
+  *reg(TS21_RCC)     = (1U << 24) | 1;
+  *reg(TS21_RCC + 4) = 0x001D8C0A;
+  assert(ts21_board_init());
+#ifdef TS21_IRONOS
+  assert(TS21_CLOCK_HZ == 64000000);
+  assert((ts21_mmio_read(TS21_RCC + 4) & 0x3FFFFF) == 0x18C40A);
+  assert(*reg(0x40023800) & 0x10);
+  assert(ts21_mmio_read(TS21_RCC) & (1U << 25));
+  assert(TS21_TIMER_HZ == 8000000);
+  assert(TS21_APB1_HZ == 32000000);
+  assert(*reg(TS21_USART2 + 8) == 3333);
+#else
+  assert(TS21_CLOCK_HZ == 8000000);
+  assert((ts21_mmio_read(TS21_RCC + 4) & 0xFFFF) == 0);
+  assert(!(ts21_mmio_read(TS21_RCC) & (1U << 25)));
+  assert(*reg(TS21_USART2 + 8) == 833);
+#endif
+  assert(*reg(TS21_SYSTICK) == 1);
+  require_inhibited();
+
+  reset();
+  *reg(TS21_RCC + 4) = 8;
+  hsi_selected       = false;
+  assert(!ts21_board_init());
+  assert(ts21_status.errors & TS21_ERROR_CLOCK);
+  require_inhibited();
+
+  reset();
+  pll_stuck = true;
+  assert(!ts21_board_init());
+  assert(ts21_status.errors & TS21_ERROR_CLOCK);
+  require_inhibited();
+
+#ifdef TS21_IRONOS
+  reset();
+  pll_ready = false;
+  assert(!ts21_board_init());
+  assert(ts21_status.errors & TS21_ERROR_CLOCK);
+  require_inhibited();
+
+  reset();
+  pll_selected = false;
+  assert(!ts21_board_init());
+  assert(ts21_status.errors & TS21_ERROR_CLOCK);
+  require_inhibited();
+#endif
 }
 
 static void test_faults(void) {
@@ -324,7 +415,13 @@ static void test_full_oled_page_and_bounds(void) {
   for (unsigned i = 0; i < sizeof(page); ++i) {
     page[i] = (uint8_t)i;
   }
+  const uint64_t started = ticks;
   assert(ts21_oled_write(0x40, page, sizeof(page)));
+#ifdef TS21_IRONOS
+  assert((ticks - started) / TS21_TIMER_TICKS_PER_US < 9000);
+#else
+  assert((ticks - started) / TS21_TIMER_TICKS_PER_US < 13000);
+#endif
   assert(i2c_count == sizeof(page) + 2);
   assert(i2c_bytes[0] == 0x78 && i2c_bytes[1] == 0x40);
   assert(memcmp(page, i2c_bytes + 2, sizeof(page)) == 0);
@@ -344,12 +441,20 @@ static void test_timebase_wrap_and_bounds(void) {
   assert(ts21_board_init());
   ticks = UINT32_MAX - 3;
   assert(ts21_delay_us(10));
-  assert(ticks < 16);
+  assert(ticks > UINT32_MAX && ticks < (uint64_t)UINT32_MAX + 16 * TS21_TIMER_TICKS_PER_US);
   assert(ts21_status.errors == 0);
-  const uint32_t before = ticks;
+  const uint64_t before = ticks;
   assert(!ts21_delay_us(100001));
   assert(ticks == before);
   assert(ts21_status.errors & TS21_ERROR_ARGUMENT);
+  clock_running = false;
+  ticks         = (uint64_t)UINT32_MAX * TS21_TIMER_TICKS_PER_US;
+  assert(ts21_micros() == UINT32_MAX);
+  ticks += TS21_TIMER_TICKS_PER_US;
+  assert(ts21_micros() == 0);
+  clock_running = true;
+  ticks         = UINT32_MAX - TS21_TIMER_TICKS_PER_US + 1;
+  assert(ts21_timer_now() > UINT32_MAX);
   require_inhibited();
 }
 
@@ -361,7 +466,7 @@ static void test_sensor_sequence(void) {
   assert(sample.tip_probe == 0xABC && sample.tip == 0xABC && sample.handle == 0xABC && sample.input == 0xABC && sample.auxiliary == 0xABC);
   assert(!(*reg(TS21_GPIOA + 12) & 1));
   assert(!(*reg(TS21_GPIOB + 12) & (1U << 15)));
-  assert(ticks >= 1600);
+  assert(ticks >= 1600 * TS21_TIMER_TICKS_PER_US);
   require_inhibited();
 
   conversion_complete = false;
@@ -415,6 +520,7 @@ static void test_sensor_conversion(void) {
 int main(void) {
   test_protocol();
   test_startup_and_inputs();
+  test_clocks();
   test_faults();
   test_i2c_and_passive_uart();
   test_full_oled_page_and_bounds();
@@ -422,6 +528,6 @@ int main(void) {
   test_sensor_sequence();
   test_sensor_conversion();
   test_all_pwm_requests_inhibited();
-  puts("TS21 host tests passed: protocol, inhibit ordering, inputs, ADC, UART, I2C and bounded failures");
+  puts("TS21 host tests passed: protocol, inhibit ordering, button mapping, clocks, ADC, UART, I2C and bounded failures");
   return 0;
 }

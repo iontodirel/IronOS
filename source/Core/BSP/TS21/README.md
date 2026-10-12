@@ -12,8 +12,8 @@ This remains a development port, not supported soldering firmware. The earlier
 diagnostic was accepted by the TS21 bootloader (`.rdy`) and booted on one device.
 Its `A1/C8` display orientation was upside down. The IronOS target uses the
 stock panel mapping: `A0/C0/D3 30` normally, `A1/C8/D3 10` when rotated, and
-sequential COM wiring. The application now reaches the normal UI on the device.
-The final display mapping, physical button mapping, sensor accuracy and
+sequential COM wiring. The full normal UI is now confirmed on the device.
+The revised physical button mapping, responsiveness, sensor accuracy and
 electrical heater inhibition still require confirmation.
 
 The first full IronOS image was subsequently accepted as `I21OS.rdy`: 99,985
@@ -46,7 +46,29 @@ remains 128x32; no rows, columns or controls are removed to hide the clipping.
 The display-mapping image was accepted as `I21LCD.rdy` (100,120 Intel HEX
 bytes; 35,572 application bytes). Its HEX SHA-256 is
 `9eb9947c76f8868125e9b669152975f52ef2fbb74b6de22346f40a9b2b86f31e`.
-Its physical screen result has not yet been confirmed.
+The user confirmed that the complete UI works, then reported sluggish response
+and reversed top/bottom button actions.
+
+The normal IronOS target now maps PA5 (top) to logical B: a short press/release
+opens settings. PA7 (bottom) maps to logical A and the normal soldering screen,
+still with no heater output. Long-press and simultaneous-button behavior remain
+the shared IronOS implementation; the bootloader's DFU button is unchanged.
+
+The application no longer uses the diagnostic's 8 MHz core clock. It selects
+the WCH HSI-fed PLL at 64 MHz (undivided 8 MHz HSI x8), with APB1 at 32 MHz,
+APB2 at 64 MHz and ADC at 8 MHz. The 8 MHz free-running counter is converted
+back to microseconds; RTOS ticks stay at 1 kHz, receive-only UART stays at 9600
+baud, and sensor settling delays retain their original durations. The power-of-two
+counter clock avoids pulling a large 64-bit division routine into the 35 KiB
+application region. A 96 MHz version exceeded that protected budget.
+
+OLED data/ACK clocks use 2 us minimum half-periods, at most 250 kHz before
+software overhead; start/stop delays remain 4 us. Stock TS21 byte output at
+`0x08007248` uses the short delay loop at `0x08007186`, rather than requiring
+slow transfers. The working command framing, page transfers and panel offsets
+are unchanged. Clock-lock/switch failures and I2C errors remain bounded and
+fatal with heating inhibited. The standalone diagnostic retains its 8 MHz clock,
+4 us data/ACK delays and raw GPIO button labels.
 
 The optional startup regression uses the actual linked ELF with simulated
 peripherals; it does not replace on-device observation. In a development Python
@@ -55,13 +77,22 @@ then run from the repository root:
 
 ```sh
 python3 source/Core/BSP/TS21/tools/emulate_boot.py source/Hexfile/TS21_EN.elf \
-  --prefix "$HOME/ts21-toolchain/bin/riscv-none-embed-" --inherited-interrupt
+  --prefix "$HOME/ts21-toolchain/bin/riscv-none-embed-" --inherited-interrupt \
+  --max-frame-us 60000
 ```
 
 Repeat without `--inherited-interrupt` for a reset-context entry. Both must reach
 the normal GUI, transfer at least two framebuffers and service timer interrupts
 without driving the heater pins high. This dependency is not required for normal
 firmware builds or the existing native tests.
+
+In this instruction-count model, the old 8 MHz image took 106-146 ms per
+frame transfer; the 64 MHz/faster-bus image takes 37-39 ms and passes the same
+60 ms limit in both entry contexts. These are simulated transfers, not measured
+panel refresh rates or guaranteed button latency. The new image contains 35,732
+application bytes, with HEX SHA-256
+`df699ef30a5801bcb8ca4e6932343def7715835f18ebd73441b81947f1d59b95`.
+Its clock, responsiveness and button assignment still need on-device confirmation.
 
 The heater lockout is unconditional in `setTipPWM()`: every requested duty cycle
 and both PWM modes disable TIM3 and hold PA6/PA10 low. `HEATER_DISABLED` also
@@ -82,6 +113,10 @@ reported IronOS heater power, inherited interrupt reset, sensor conversion and
 failure paths, and all 56 columns of each four-row mirrored home-screen asset.
 They also execute the actual OLED driver to check its startup and both rotation
 command sequences and every byte of all four 128-column framebuffer pages.
+Both diagnostic and IronOS clock configurations are covered, including PLL
+failures, UART divisor, counter rollover, microsecond delays and OLED edge timing.
+The shared button decoder and home-screen actions are exercised for menu entry,
+the soldering-screen action, 400 ms holds and simultaneous-button release.
 The image-tool tests check the protected memory ranges and exact HEX contents.
 
 The equivalent source target is
@@ -96,8 +131,9 @@ CMSIS API adapter calls the existing FreeRTOS kernel directly; ST-only CMSIS
 implementation sources are not used on this MCU. The MIT-licensed WCH RISC-V
 port is in `IronOS/Port`, with its notices retained. Adaptations are self-contained
 header includes, four-byte handler alignment, compiler barriers around interrupt
-masking/stack switching, and a free-running 1 MHz tick reload so the I2C/ADC delays
-keep working after the scheduler starts. Reload accounts for delayed interrupts
+masking/stack switching, and a 1 kHz tick reload from the free-running 8 MHz
+counter so the I2C/ADC delays keep working after the scheduler starts.
+Reload accounts for delayed interrupts
 and low-word rollover. Interrupts
 left enabled by the bootloader are disabled/cleared before scheduler startup.
 
