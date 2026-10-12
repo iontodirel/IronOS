@@ -21,6 +21,37 @@ budget. Its HEX SHA-256 is
 `753512288934168dfe446d803b13c574b5ec4eb37e8a80a485b14fd0a34f4eda`.
 This records updater acceptance, **not** observed execution of the full port.
 
+That first image subsequently failed on hardware with only a flashing logo.
+Its RTOS startup called `main` directly instead of using the `mepc`/`mret`
+handoff used by both the stock TS21 image and WCH's FreeRTOS startup. An
+inherited bootloader interrupt context can then suppress the low-priority
+software/timer interrupts, leaving the first task unable to yield to the GUI.
+Startup now configures the WCH instruction pipeline and enters `main` through
+`mret`, with an unexpected return directed to the inhibited fault handler.
+Instruction-level simulation reproduces the missing-GUI failure for the old
+entry with an active interrupt and reaches the normal GUI with the corrected
+entry, both with and without that inherited state. This is a simulated handoff
+regression, not a measured hardware trace; the corrected image still requires
+physical confirmation.
+The corrected image was accepted as `I21FIX.rdy` (35,548 application bytes);
+its HEX SHA-256 is
+`53a578226cc11163faf98cb346891285e43aba96b758d985fbe07d70d9bf61d7`.
+
+The optional startup regression uses the actual linked ELF with simulated
+peripherals; it does not replace on-device observation. In a development Python
+environment, install `tools/requirements-emulation.txt` from this directory,
+then run from the repository root:
+
+```sh
+python3 source/Core/BSP/TS21/tools/emulate_boot.py source/Hexfile/TS21_EN.elf \
+  --prefix "$HOME/ts21-toolchain/bin/riscv-none-embed-" --inherited-interrupt
+```
+
+Repeat without `--inherited-interrupt` for a reset-context entry. Both must reach
+the normal GUI, transfer at least two framebuffers and service timer interrupts
+without driving the heater pins high. This dependency is not required for normal
+firmware builds or the existing native tests.
+
 The heater lockout is unconditional in `setTipPWM()`: every requested duty cycle
 and both PWM modes disable TIM3 and hold PA6/PA10 low. `HEATER_DISABLED` also
 forces IronOS's requested and reported output power to zero. Settings, autostart,

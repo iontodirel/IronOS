@@ -56,6 +56,8 @@ reset_handler:
     j 3b
 4:
 #ifdef TS21_IRONOS
+    li t0, 0x1f
+    csrw 0xbc0, t0
     li t0, 2
     csrw 0x804, t0
     li t0, 0x1800
@@ -68,8 +70,14 @@ reset_handler:
     csrw mtvec, t0
 #ifdef TS21_IRONOS
     call ts21_run_constructors
-#endif
+    // Leave any bootloader interrupt context before starting FreeRTOS.
+    la ra, fault_handler
+    la t0, main
+    csrw mepc, t0
+    mret
+#else
     call main
+#endif
 fault_handler:
     csrw mstatus, zero
     li a0, 64
