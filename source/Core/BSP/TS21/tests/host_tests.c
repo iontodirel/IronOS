@@ -32,6 +32,7 @@ static uint8_t         uart_bytes[32];
 static unsigned        uart_size;
 static unsigned        uart_position;
 static uint32_t        uart_error;
+static uint16_t        adc_value;
 
 static uint32_t *reg(uint32_t address) {
   for (unsigned i = 0; i < register_count; ++i) {
@@ -56,6 +57,9 @@ uint32_t ts21_mmio_read(uint32_t address) {
     return ticks;
   }
   if (address == TS21_ADC1 + 8 && calibration_complete) {
+    if (*reg(address) & 4U) {
+      *reg(TS21_ADC1 + 0x4C) = 1024;
+    }
     *reg(address) &= ~12U;
   }
   if (address == TS21_GPIOA + 8) {
@@ -114,7 +118,7 @@ void ts21_mmio_write(uint32_t address, uint32_t value) {
     }
   } else if (address == TS21_ADC1 + 8 && (value & 0x400000U) && conversion_complete) {
     *reg(TS21_ADC1) |= 2;
-    *reg(TS21_ADC1 + 0x4C) = 0xFABC;
+    *reg(TS21_ADC1 + 0x4C) = adc_value;
   }
 }
 
@@ -131,6 +135,7 @@ static void reset(void) {
   i2c_pulses = i2c_count = 0;
   uart_size = uart_position = 0;
   uart_error                = 0;
+  adc_value                 = 0xFABC;
   *reg(TS21_GPIOA + 12)     = TS21_HEATER_EN | TS21_HEATER_IN;
   *reg(TS21_TIM3)           = 1;
   *reg(TS21_TIM3 + 0x20)    = 1;
@@ -206,6 +211,10 @@ static void test_startup_and_inputs(void) {
   reset();
   assert(ts21_board_init());
   assert(ts21_status.errors == 0);
+  for (unsigned bank = 0; bank < 8; ++bank) {
+    assert(*reg(0xE000E180 + bank * 4) == UINT32_MAX);
+    assert(*reg(0xE000E280 + bank * 4) == UINT32_MAX);
+  }
   require_inhibited();
   unsigned clear_index = 0;
   unsigned mode_index  = 0;
@@ -344,6 +353,65 @@ static void test_timebase_wrap_and_bounds(void) {
   require_inhibited();
 }
 
+static void test_sensor_sequence(void) {
+  reset();
+  assert(ts21_board_init());
+  struct TS21Sample sample = {0};
+  assert(ts21_sample_sensors(&sample));
+  assert(sample.tip_probe == 0xABC && sample.tip == 0xABC && sample.handle == 0xABC && sample.input == 0xABC && sample.auxiliary == 0xABC);
+  assert(!(*reg(TS21_GPIOA + 12) & 1));
+  assert(!(*reg(TS21_GPIOB + 12) & (1U << 15)));
+  assert(ticks >= 1600);
+  require_inhibited();
+
+  conversion_complete = false;
+  assert(!ts21_sample_sensors(&sample));
+  assert(!(*reg(TS21_GPIOA + 12) & 1));
+  assert(!(*reg(TS21_GPIOB + 12) & (1U << 15)));
+  require_inhibited();
+  assert(!ts21_sample_sensors(NULL));
+}
+
+static void test_all_pwm_requests_inhibited(void) {
+  for (unsigned fast = 0; fast < 2; ++fast) {
+    for (unsigned pulse = 0; pulse < 256; ++pulse) {
+      reset();
+      setTipPWM((uint8_t)pulse, fast != 0);
+      require_inhibited();
+    }
+  }
+}
+
+static void test_sensor_conversion(void) {
+  int16_t value = 1234, previous = INT16_MIN;
+  assert(!ts21_tip_delta_c(0, &value) && value == 1234);
+  assert(!ts21_tip_delta_c(4095, &value) && value == 1234);
+  assert(!ts21_tip_delta_c(1000, NULL));
+  for (uint16_t raw = 1; raw < 4095; ++raw) {
+    assert(ts21_tip_delta_c(raw, &value));
+    assert(value >= previous);
+    const double x        = raw - 563.0;
+    const double expected = -0.00001 * x * x + 0.2006 * x - 3.1236;
+    assert(value - expected > -1.001 && value - expected < 1.001);
+    previous = value;
+  }
+  assert(ts21_handle_c_x10(2864, &value) && value == 250);
+  assert(ts21_handle_c_x10(3654, &value) && value == 0);
+  assert(ts21_handle_c_x10(4015, &value) && value == -300);
+  assert(ts21_handle_c_x10(230, &value) && value == 1250);
+  assert(!ts21_handle_c_x10(229, &value));
+  assert(!ts21_handle_c_x10(4016, &value));
+  assert(!ts21_handle_c_x10(2800, NULL));
+  previous = INT16_MAX;
+  for (uint16_t raw = 230; raw <= 4015; ++raw) {
+    assert(ts21_handle_c_x10(raw, &value) && value <= previous);
+    previous = value;
+  }
+  assert(ts21_input_voltage_x10(0) == 0);
+  assert(ts21_input_voltage_x10(1) == 0);
+  assert(ts21_input_voltage_x10(1451) == 100);
+}
+
 int main(void) {
   test_protocol();
   test_startup_and_inputs();
@@ -351,6 +419,9 @@ int main(void) {
   test_i2c_and_passive_uart();
   test_full_oled_page_and_bounds();
   test_timebase_wrap_and_bounds();
+  test_sensor_sequence();
+  test_sensor_conversion();
+  test_all_pwm_requests_inhibited();
   puts("TS21 host tests passed: protocol, inhibit ordering, inputs, ADC, UART, I2C and bounded failures");
   return 0;
 }

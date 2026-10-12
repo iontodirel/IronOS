@@ -463,7 +463,9 @@ const menuitem advancedMenu[] = {
   /* Power limit */
   {SETTINGS_DESC(SettingsItemIndex::PowerLimit), nullptr, displayPowerLimit, nullptr, SettingsOptions::PowerLimit, SettingsItemIndex::PowerLimit, 4},
   /* Calibrate Cold Junktion Compensation at next boot */
+#ifndef TEMP_DIRECT_ADC
   {SETTINGS_DESC(SettingsItemIndex::CalibrateCJC), setCalibrate, displayCalibrate, nullptr, SettingsOptions::CalibrateCJC, SettingsItemIndex::CalibrateCJC, 7},
+#endif
   /* Voltage input cal */
   {SETTINGS_DESC(SettingsItemIndex::VoltageCalibration), setCalibrateVIN, noOpDisplay, nullptr, SettingsOptions::SettingsOptionsLength, SettingsItemIndex::VoltageCalibration, 5},
   /* Power Pulse adjustment */

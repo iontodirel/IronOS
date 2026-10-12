@@ -1,14 +1,107 @@
-# Experimental TS21 bring-up
+# Experimental TS21 IronOS port
+
+## Normal IronOS, heater disabled
+
+`make ts21-ironos TS21_EXPERIMENTAL=1 CROSS_COMPILE=<prefix>` builds the real
+IronOS application: the existing GUI, menus, buttons, settings, PID task and
+FreeRTOS kernel. Its image is `source/Hexfile/TS21_EN.hex`; this is **not** the
+standalone diagnostic described later in this document. Nothing custom is
+added to the screen.
+
+This remains a development port, not supported soldering firmware. The earlier
+diagnostic was accepted by the TS21 bootloader (`.rdy`) and booted on one device.
+Its `A1/C8` display orientation was upside down; the IronOS target instead uses
+`A0/C0`, offset zero and the panel's sequential COM layout. Normal IronOS
+execution, the corrected orientation, physical button mapping, sensor accuracy
+and electrical heater inhibition still require confirmation on the device.
+
+The first full IronOS image was subsequently accepted as `I21OS.rdy`: 99,985
+Intel HEX bytes containing 35,524 application bytes, within the 35,840-byte
+budget. Its HEX SHA-256 is
+`753512288934168dfe446d803b13c574b5ec4eb37e8a80a485b14fd0a34f4eda`.
+This records updater acceptance, **not** observed execution of the full port.
+
+The heater lockout is unconditional in `setTipPWM()`: every requested duty cycle
+and both PWM modes disable TIM3 and hold PA6/PA10 low. `HEATER_DISABLED` also
+forces IronOS's requested and reported output power to zero. Settings, autostart,
+boost and power-bank keepalive cannot enable it. There is no build switch for
+enabling the TS21 heater.
+
+Build with the WCH toolchain below, Python dependencies from
+`Translations/requirements.txt`, GNU Make and native C/C++ compilers:
+
+```sh
+make ts21-ironos TS21_EXPERIMENTAL=1 CROSS_COMPILE="$HOME/ts21-toolchain/bin/riscv-none-embed-"
+make test-ts21
+```
+
+Native tests exercise all 512 BSP PWM level/mode requests, zero requested and
+reported IronOS heater power, inherited interrupt reset, sensor conversion and
+failure paths, and all 56 columns of each four-row mirrored home-screen asset.
+The image-tool tests check the protected memory ranges and exact HEX contents.
+
+The equivalent source target is
+`make -C source model=TS21 TS21_EXPERIMENTAL=1 COMPILER_PREFIX=<prefix-without-final-dash> Hexfile/TS21_EN.hex`.
+`HOST_PYTHON` can select a virtual environment. TS21 is not included in release
+matrices. Without the experimental opt-in even an existing image is refused.
+The same strict ELF/HEX byte comparison and protected memory bounds apply.
+
+The `IronOS/` BSP uses the existing application entry point, not `main.c` in this
+directory, and excludes host tests from embedded source discovery. Its small
+CMSIS API adapter calls the existing FreeRTOS kernel directly; ST-only CMSIS
+implementation sources are not used on this MCU. The MIT-licensed WCH RISC-V
+port is in `IronOS/Port`, with its notices retained. Adaptations are self-contained
+header includes, four-byte handler alignment, compiler barriers around interrupt
+masking/stack switching, and a free-running 1 MHz tick reload so the I2C/ADC delays
+keep working after the scheduler starts. Reload accounts for delayed interrupts
+and low-word rollover. Interrupts
+left enabled by the bootloader are disabled/cleared before scheduler startup.
+
+Sensor sampling follows the stock PA10-low, PB15-high, PA0-high/low sequence
+with 200/600/800 microsecond settling delays. It reads both phases of ADC1,
+ADC2 (handle thermistor), ADC9 (input voltage), then ADC4 after releasing PB15.
+The D6 ADC calibration uses both internal reference levels. Stock v1.5.0's
+numeric conversion evidence is implemented independently:
+
+- Tip delta: `x = ADC1_low - 563`; degrees C = `-0.00001*x*x + 0.2006*x - 3.1236`.
+- Handle: interpolation of the ADC2 thermistor curve, -30 to 125 C, added as
+  cold-junction compensation. The sparse 5 C table still needs comparison with
+  an external reference thermometer.
+- Input: volts = `ADC9*0.0069 - 0.0088`, with IronOS's voltage adjustment.
+
+These are inferred factory transfer functions, **not measured calibration of
+this board or cartridge**. Invalid ADC/thermistor readings latch sensor errors
+and mark the tip unavailable. The unknown thermocouple gain is not replaced
+with S60 values: the microvolt debug fields show the normal unavailable icon,
+and microvolt-based CJC calibration is not offered.
+
+Settings occupy only the 256-byte page at `0x0800FC00`. Saving uses the WCH
+256-byte fast erase, never the 4 KiB normal erase. Bootloader code and Miniware's
+settings at `0x0800FF00` are not erased. Writes are bounded, read back and checked;
+failures inhibit the heater and latch a flash error. Like other single-page
+IronOS settings implementations, this is not power-loss-atomic.
+
+Motion/private bootloader services, active PD negotiation, heater drive,
+cartridge resistance/short detection and custom boot logos are not implemented.
+Power telemetry remains receive-only; no high-voltage request is sent.
+Automatic rotation and motion sleep are disabled. Do not infer heating readiness
+from a booting GUI or a plausible temperature number.
+
+For this image use the DFU procedure below but copy **`TS21_EN.hex`**, then wait
+for `.rdy`. Reconnect normally to see the standard IronOS interface. Keep the
+cartridge removed for first boot, as for the previously confirmed diagnostic.
+
+## Earlier standalone diagnostic
 
 **This is a standalone digital-hardware diagnostic, not an IronOS soldering port.**
-It has not been run on a TS21. The pin map is inferred from stock firmware, not
+It has booted on one TS21, with an inverted but readable display. The pin map is inferred from stock firmware, not
 verified against a schematic or measurements. Successful compilation, host tests,
 and image inspection do not establish hardware compatibility or safety.
 
 There is no heater-enable path, temperature conversion, PID control, power
 negotiation, settings persistence, motion support, or FreeRTOS integration.
-The OLED header says `NO HEATING`. TS21 is deliberately absent from the normal
-`model=` list and release builds. An explicitly enabled HEX export is available
+The OLED header says `NO HEATING`. It is separate from the experimental
+`model=TS21` IronOS target and release builds. An explicitly enabled HEX export is available
 only for cartridge-removed bench testing. There is no automatic flashing target.
 Do not install this as a replacement for stock soldering firmware.
 
@@ -109,7 +202,7 @@ The vendor's update procedure, applied only after those prerequisites:
    is not itself evidence that the bootloader accepted the firmware.
 4. Disconnect and reconnect, keeping the cartridge removed. The expected
    diagnostic display is `NO HEATING` with GPIO button states underneath.
-   Display orientation/offset and actual execution still need confirmation.
+   This diagnostic's orientation is inverted on the observed device.
 
 If the display stays blank, the device resets, or the bootloader reports an
 error, stop the diagnostic attempt. Re-enter DFU and use the official stock
@@ -204,6 +297,8 @@ The timestamp is a wrapping 32-bit counter.
 | `0x10` | UART receive error |
 | `0x20` | Invalid API argument |
 | `0x40` | Unexpected trap or return from main |
+| `0x80` | IronOS settings flash operation or readback failure |
+| `0x100` | IronOS sensor reading unavailable or outside its conversion range |
 
 ADC failures invalidate the reading rather than substituting a successful zero.
 Fatal clock/display/trap paths repeatedly inhibit the heater and refresh the

@@ -56,8 +56,8 @@ _PD Mode_ option in _Power settings_ submenu to _Safe_ or _Default_.
 
 ## Experimental TS21 development
 
-The [TS21 bring-up target](source/Core/BSP/TS21/README.md) is a standalone, heater-disabled diagnostic, **not working IronOS soldering firmware**.
-It has not been tested on hardware and is excluded from supported models and release builds.
+The [experimental TS21 port](source/Core/BSP/TS21/README.md) builds the normal IronOS interface with the heater **unconditionally disabled**.
+The TS21 updater has accepted the full image, but normal runtime and sensor accuracy still need hardware validation. It is excluded from supported models and release builds.
 
 ## Getting Started
 

@@ -97,7 +97,8 @@ list:
 	@echo "  * docs               - generate \"site\"/ directory with documentation in a form of static html files using ReadTheDocs framework and $(MKDOCS_YML) local config file"
 	@echo "  * docs-deploy        - generate & deploy docs online to gh-pages branch of current github repo"
 	@echo "  * tests              - run set of checks, linters & tests (equivalent of github CI IronOS project settings for push trigger)"
-	@echo "  * test-ts21          - run host tests for the experimental TS21 diagnostic (no cross compiler needed)"
+	@echo "  * test-ts21          - run TS21 hardware and IronOS lockout tests (native C/C++ compilers)"
+	@echo "  * ts21-ironos        - build normal IronOS with the TS21 heater hard-disabled (requires TS21_EXPERIMENTAL=1)"
 	@echo "  * ts21-bringup       - build the unvalidated TS21 no-heater ELF (requires TS21_EXPERIMENTAL=1; see source/Core/BSP/TS21/README.md)"
 	@echo "  * ts21-bringup-hex   - export a checked diagnostic HEX for cartridge-removed bench testing (requires TS21_EXPERIMENTAL=1)"
 	@echo "  * clean-build        - delete generated files & dirs produced during builds EXCEPT docker image & its build cache"
@@ -203,6 +204,10 @@ ts21-bringup:
 ts21-bringup-hex:
 	$(MAKE) -C source/Core/BSP/TS21 probe-hex EXPERIMENTAL=$(TS21_EXPERIMENTAL)
 
+ts21-ironos:
+	$(MAKE) -C source model=TS21 TS21_EXPERIMENTAL=$(TS21_EXPERIMENTAL) \
+		$(if $(CROSS_COMPILE),COMPILER_PREFIX=$(patsubst %-,%,$(CROSS_COMPILE))) Hexfile/TS21_EN.hex
+
 # former scripts/ci/buildAll.sh - all in one to build all firmware & place the produced binaries into one output directory
 build-all:
 	@mkdir  -p  $(OUT_DIR)
@@ -262,5 +267,5 @@ clean-full: clean-build  docker-clean
 .PHONY:  docker-check  docker-shell  docker-build  docker-clean-image  docker-clean-cache  docker-clean
 .PHONY:  docs  docs-deploy
 .PHONY:  test-md  test-sh  test-py  test-ccpp  test-ts21  tests
-.PHONY:  build-all  build-multilang  ci  ts21-bringup  ts21-bringup-hex
+.PHONY:  build-all  build-multilang  ci  ts21-ironos  ts21-bringup  ts21-bringup-hex
 .PHONY:  clean-build  clean-full

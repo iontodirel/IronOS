@@ -28,6 +28,9 @@ bool shouldBeUsingFastPWMMode(const uint8_t pwmTicks) {
 }
 
 void setTipX10Watts(int32_t mw) {
+#ifdef HEATER_DISABLED
+  mw = 0;
+#endif
   int32_t    outputPWMLevel   = X10WattsToPWM(mw, 1);
   const bool shouldUseFastPWM = shouldBeUsingFastPWMMode(outputPWMLevel);
   setTipPWM(outputPWMLevel, shouldUseFastPWM);

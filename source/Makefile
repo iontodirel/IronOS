@@ -9,6 +9,14 @@ ALL_MHP30_MODELS=MHP30
 ALL_SEQURE_MODELS=S60 S60P T55 S99
 ALL_MODELS=$(ALL_MINIWARE_MODELS) $(ALL_PINECIL_MODELS) $(ALL_MHP30_MODELS) $(ALL_PINECIL_V2_MODELS) $(ALL_SEQURE_MODELS)
 
+ifeq ($(model),TS21)
+.DELETE_ON_ERROR:
+ifneq ($(TS21_EXPERIMENTAL),1)
+$(error TS21 is a heater-disabled development port; set TS21_EXPERIMENTAL=1)
+endif
+ALL_MODELS+=TS21
+endif
+
 ifneq ($(model),$(filter $(model),$(ALL_MODELS)))
 $(error Invalid model '$(model)', valid options are: $(ALL_MODELS))
 endif
@@ -307,6 +315,17 @@ bootldr_size=0x0
 
 endif # ALL_PINECIL_V2_MODELS
 
+ifeq ($(model),TS21)
+DEVICE_BSP_DIR=./Core/BSP/TS21/IronOS
+LDSCRIPT=./Core/BSP/TS21/ts21.ld
+flash_size=64k
+bootldr_size=0x7000
+DEVICE_DFU_ADDRESS=0x08007000
+CPUFLAGS=-march=rv32imac -mabi=ilp32 -mcmodel=medany -fsigned-char -nostartfiles
+DEV_LDFLAGS=-nostartfiles
+DEV_GLOBAL_DEFS=-DTS21_IRONOS -DportasmHANDLE_INTERRUPT=unused
+endif
+
 DEVICE_BSP_INCLUDE_DIRS:= ${shell find ${DEVICE_BSP_DIR} -type d -print}
 THREADS_INCLUDE_DIRS:= ${shell find ${THREADS_DIR} -type d -print}
 DRIVERS_INCLUDE_DIRS:= ${shell find ${DRIVERS_DIR} -type d -print}
@@ -342,6 +361,13 @@ SOURCE_CPP:=$(shell find ${THREADS_DIR}      -type f -name '*.cpp') \
 
 S_SRCS:=$(shell find $(DEVICE_BSP_DIR) -type f -name '*.S')
 
+ifeq ($(model),TS21)
+INCLUDES+=-I./Core/BSP/TS21
+SOURCE:=$(filter-out ./Core/Src/freertos.c ./Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS/%,$(SOURCE))
+SOURCE+=./Core/BSP/TS21/hardware.c ./Core/BSP/TS21/protocol.c ./Core/BSP/TS21/sensors.c
+S_SRCS+=./Core/BSP/TS21/startup.S
+endif
+
 
 # Code optimisation ------------------------------------------------------------
 OPTIM=-Os                             \
@@ -366,6 +392,10 @@ OPTIM=-Os                             \
       -ffinite-math-only              \
       -fno-signed-zeros               \
       -fsingle-precision-constant
+
+ifeq ($(model),TS21)
+OPTIM:=$(subst -flto=auto,-flto,$(OPTIM))
+endif
 
 # Global defines ---------------------------------------------------------------
 GLOBAL_DEFINES+=$(DEV_GLOBAL_DEFS) -D USE_RTOS_SYSTICK -D MODEL_$(model) -D VECT_TAB_OFFSET=$(bootldr_size)U -fshort-wchar $(DENSE_UI_DEFINE)
@@ -397,6 +427,9 @@ COMPILER_PREFIX=arm-none-eabi
 endif
 ifeq ($(model),$(filter $(model),$(ALL_PINECIL_MODELS) $(ALL_PINECIL_V2_MODELS)))
 COMPILER_PREFIX=riscv-none-elf
+endif
+ifeq ($(model),TS21)
+COMPILER_PREFIX?=riscv-none-embed
 endif
 
 # Programs ---------------------------------------------------------------------
@@ -503,6 +536,9 @@ firmware-%: $(HEXFILE_DIR)/$(model)_%.hex $(HEXFILE_DIR)/$(model)_%.bin $(HEXFIL
 
 %.hex: %.elf Makefile
 	$(OBJCOPY) $< -O ihex $@
+ifeq ($(model),TS21)
+	$(HOST_PYTHON) Core/BSP/TS21/tools/inspect_image.py $< --hex $@
+endif
 
 %.bin: %.elf Makefile
 	$(OBJCOPY) $< -O binary $@
@@ -602,12 +638,12 @@ $(OUTPUT_DIR)/Core/Gen/settings_gen.%.o: Core/Gen/settings_gen.%.cpp
 $(OUTPUT_DIR)/Core/Gen/translation.files/%.o: Core/Gen/Translation.%.cpp
 	@test -d $(@D) || mkdir -p $(@D)
 	@echo Generating $@
-	@$(CPP) -c $(filter-out -flto=auto ,$(CXXFLAGS)) $< -o $@
+	@$(CPP) -c $(filter-out -flto%,$(CXXFLAGS)) $< -o $@
 
 $(OUTPUT_DIR)/Core/Gen/translation.files/multi.%.o: Core/Gen/Translation_multi.%.cpp
 	@test -d $(@D) || mkdir -p $(@D)
 	@echo Generating $@
-	@$(CPP) -c $(filter-out -flto=auto ,$(CXXFLAGS)) $< -o $@
+	@$(CPP) -c $(filter-out -flto%,$(CXXFLAGS)) $< -o $@
 
 $(HOST_OUTPUT_DIR)/brieflz/libbrieflz.so: Core/brieflz/brieflz.c Core/brieflz/depack.c
 	@test -d $(@D) || mkdir -p $(@D)

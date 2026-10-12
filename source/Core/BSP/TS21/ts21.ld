@@ -22,6 +22,10 @@ SECTIONS
         *(.text .text.*)
         *(.rodata .rodata.* .srodata .srodata.* .sdata2 .sdata2.*)
         . = ALIGN(4);
+        __init_array_start = .;
+        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+        KEEP(*(.init_array))
+        __init_array_end = .;
     } > FLASH
     .data :
     {
@@ -42,6 +46,7 @@ SECTIONS
         __bss_end = .;
     } > RAM
     __stack_top = ORIGIN(RAM) + LENGTH(RAM);
+    __freertos_irq_stack_top = __stack_top;
     __stack_bottom = __stack_top - 0x800;
     /DISCARD/ :
     {

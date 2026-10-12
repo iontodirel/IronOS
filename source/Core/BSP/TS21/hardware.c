@@ -7,6 +7,7 @@ static void     ts21_mmio_write(uint32_t address, uint32_t value) { *(volatile u
 
 static bool                uart_ready;
 static bool                adc_ready;
+static int16_t             adc_offset;
 static struct TS21PDParser pd_parser;
 
 static void modify(uint32_t address, uint32_t clear, uint32_t set) { ts21_mmio_write(address, (ts21_mmio_read(address) & ~clear) | set); }
@@ -41,6 +42,12 @@ void ts21_heater_inhibit(void) {
 }
 
 void ts21_watchdog_refresh(void) { ts21_mmio_write(TS21_IWDG, 0xAAAA); }
+
+void setTipPWM(uint8_t pulse, bool fast) {
+  (void)pulse;
+  (void)fast;
+  ts21_heater_inhibit();
+}
 
 uint32_t ts21_micros(void) { return ts21_mmio_read(TS21_SYSTICK + 8); }
 
@@ -95,7 +102,7 @@ static void uart_init(void) {
   uart_ready     = true;
 }
 
-void ts21_uart_poll(void) {
+static void uart_poll(void) {
   if (!uart_ready) {
     return;
   }
@@ -121,6 +128,17 @@ void ts21_uart_poll(void) {
   }
 }
 
+void ts21_uart_poll(void) {
+#ifdef TS21_IRONOS
+  uint32_t state;
+  __asm volatile("csrrci %0, mstatus, 8" : "=r"(state)::"memory");
+#endif
+  uart_poll();
+#ifdef TS21_IRONOS
+  __asm volatile("csrw mstatus, %0" ::"r"(state) : "memory");
+#endif
+}
+
 static bool adc_init(void) {
   gpio_mode(TS21_GPIOA, 1, 0);
   gpio_mode(TS21_GPIOA, 2, 0);
@@ -136,12 +154,41 @@ static bool adc_init(void) {
   if (!ts21_delay_us(10)) {
     return false;
   }
-  modify(TS21_ADC1 + 8, 0, 8);
-  if (!wait_bits(TS21_ADC1 + 8, 8, 0)) {
-    return false;
+  uint16_t calibration[10];
+  for (unsigned i = 0; i < 10; ++i) {
+    modify(TS21_ADC1 + 8, 0, 8);
+    if (!wait_bits(TS21_ADC1 + 8, 8, 0)) {
+      return false;
+    }
+    modify(TS21_ADC1 + 8, 0, 4);
+    if (!wait_bits(TS21_ADC1 + 8, 4, 0)) {
+      return false;
+    }
+    calibration[i] = (uint16_t)ts21_mmio_read(TS21_ADC1 + 0x4C);
+    for (unsigned j = i; j && calibration[j] < calibration[j - 1]; --j) {
+      const uint16_t previous = calibration[j - 1];
+      calibration[j - 1]      = calibration[j];
+      calibration[j]          = previous;
+    }
   }
-  modify(TS21_ADC1 + 8, 0, 4);
-  return wait_bits(TS21_ADC1 + 8, 4, 0);
+  // CH32V203 D6 calibration alternates 1024/2048 reference levels; discard the outer two pairs.
+  unsigned sums[2] = {0, 0}, counts[2] = {0, 0};
+  for (unsigned i = 2; i < 8; ++i) {
+    if (calibration[i] > 4095) {
+      return false;
+    }
+    const unsigned group = calibration[i] > 1536;
+    sums[group] += calibration[i];
+    ++counts[group];
+  }
+  int32_t correction = 0;
+  for (unsigned group = 0; group < 2; ++group) {
+    if (counts[group]) {
+      correction += (int32_t)((group + 1) * 1024) - (int32_t)((sums[group] * 2 + counts[group]) / (counts[group] * 2));
+    }
+  }
+  adc_offset = (int16_t)(correction / 2 + correction % 2);
+  return true;
 }
 
 bool ts21_adc_read(uint8_t channel, uint16_t *value) {
@@ -163,8 +210,31 @@ bool ts21_adc_read(uint8_t channel, uint16_t *value) {
     ts21_status.errors |= TS21_ERROR_ADC;
     return false;
   }
-  *value = (uint16_t)(ts21_mmio_read(TS21_ADC1 + 0x4C) & 0xFFFU);
+  const uint16_t raw       = (uint16_t)(ts21_mmio_read(TS21_ADC1 + 0x4C) & 0xFFFU);
+  const int32_t  corrected = (int32_t)raw + adc_offset;
+  *value                   = raw == 0 || corrected < 0 ? 0 : raw == 4095 || corrected > 4095 ? 4095 : (uint16_t)corrected;
   return true;
+}
+
+bool ts21_sample_sensors(struct TS21Sample *sample) {
+  if (sample == NULL) {
+    ts21_status.errors |= TS21_ERROR_ARGUMENT;
+    return false;
+  }
+  ts21_heater_inhibit();
+  ts21_mmio_write(TS21_GPIOA + 0x14, 1);
+  gpio_mode(TS21_GPIOA, 0, 2);
+  ts21_mmio_write(TS21_GPIOB + 0x10, 1U << 15);
+  gpio_mode(TS21_GPIOB, 15, 2);
+  bool ok = ts21_delay_us(200);
+  ts21_mmio_write(TS21_GPIOA + 0x10, 1);
+  ok = ok && ts21_delay_us(600) && ts21_adc_read(1, &sample->tip_probe);
+  ts21_mmio_write(TS21_GPIOA + 0x14, 1);
+  ok = ok && ts21_delay_us(800) && ts21_adc_read(1, &sample->tip) && ts21_adc_read(2, &sample->handle) && ts21_adc_read(9, &sample->input);
+  ts21_mmio_write(TS21_GPIOB + 0x14, 1U << 15);
+  ok = ok && ts21_adc_read(4, &sample->auxiliary);
+  ts21_heater_inhibit();
+  return ok;
 }
 
 uint8_t ts21_buttons(void) {
@@ -255,6 +325,10 @@ bool ts21_board_init(void) {
   uart_ready = false;
   adc_ready  = false;
   ts21_heater_inhibit();
+  for (unsigned bank = 0; bank < 8; ++bank) {
+    ts21_mmio_write(0xE000E180 + bank * 4, UINT32_MAX);
+    ts21_mmio_write(0xE000E280 + bank * 4, UINT32_MAX);
+  }
   if (!clock_init()) {
     ts21_status.errors |= TS21_ERROR_CLOCK;
     return false;

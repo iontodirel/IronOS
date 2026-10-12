@@ -66,7 +66,11 @@ I2C_CLASS::I2C_REG OLED_Setup_Array[] = {
     {0x80,             0xA4, 0}, /* Enable the display GDDR */
     {0x80,             0xA6, 0}, /* Normal display */
     {0x80,             0x20, 0}, /* Memory Mode */
-    {0x80,             0x00, 0}, /* Wrap memory */
+#ifdef OLED_MEMORY_MODE
+    {0x80, OLED_MEMORY_MODE, 0},
+#else
+    {0x80, 0x00, 0}, /* Wrap memory */
+#endif
     {0x80,          OLED_ON, 0}, /* Display on */
 };
 // Setup based on the SSD1307 and modified for the SSD1306
@@ -129,9 +133,9 @@ static uint16_t lerp(uint16_t a, uint16_t b, uint16_t t) { return a + t * (b - a
 // from TS101AppV220.hex, official firmware routine around 0x0800db54).
 static void i2c_send_command_byte(uint8_t cmd) { I2C_CLASS::I2C_RegisterWrite(DEVICEADDR_OLED, 0x00, cmd); }
 
-static void i2c_send_bulk(const uint8_t *buf, int len) { I2C_CLASS::Mem_Write(DEVICEADDR_OLED, 0x40, buf, len); }
+static void i2c_send_bulk(uint8_t *buf, int len) { I2C_CLASS::Mem_Write(DEVICEADDR_OLED, 0x40, buf, len); }
 
-static void oled_bulk_write(uint32_t posx, uint32_t posy, int sizex, int sizey, const uint8_t *buf) {
+static void oled_bulk_write(uint32_t posx, uint32_t posy, int sizex, int sizey, uint8_t *buf) {
   uint32_t page    = (posy & 7) == 0 ? (posy >> 3) : (posy >> 3) + 1;
   uint32_t pageEnd = (posy + sizey) & 0xff;
   pageEnd          = ((posy + sizey) & 7) == 0 ? (pageEnd >> 3) : (pageEnd >> 3) + 1;
@@ -198,6 +202,9 @@ void OLED::initialize() {
 #ifndef OLED_I2C_PER_BYTE_TRANSFERS
   memcpy(&screenBuffer[0], &REFRESH_COMMANDS[0], sizeof(REFRESH_COMMANDS));
   memcpy(&secondFrameBuffer[0], &REFRESH_COMMANDS[0], sizeof(REFRESH_COMMANDS));
+#else
+  screenBuffer[5] = OLED_GRAM_START;
+  screenBuffer[7] = OLED_GRAM_END;
 #endif /* OLED_I2C_PER_BYTE_TRANSFERS */
 
   // Set the display to be ON once the settings block is sent and send the
@@ -361,7 +368,7 @@ void OLED::maskScrollIndicatorOnOLED() {
   // it from the screen buffer which is updated by `OLED::setRotation`.
   uint8_t rightmostColumn = screenBuffer[7];
 #ifdef OLED_I2C_PER_BYTE_TRANSFERS
-  static const uint8_t zeroColumn[OLED_HEIGHT / 8] = {0}; // Clears the full column height (all pages)
+  static uint8_t zeroColumn[OLED_HEIGHT / 8] = {0}; // Clears the full column height (all pages)
   oled_bulk_write(rightmostColumn, 0, 1, OLED_HEIGHT, zeroColumn);
 #else
   uint8_t maskCommands[] = {
