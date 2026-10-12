@@ -1,10 +1,36 @@
 #!/usr/bin/env python3
+import io
 import json
 import os
 import unittest
 
 
 class TestMakeTranslation(unittest.TestCase):
+    def test_single_language_initializes_both_compressed_fonts(self):
+        import make_translation as translation
+
+        defs = translation.load_json(translation.HERE / "translations_definitions.json")
+        lang = translation.filter_translation(
+            translation.read_translation(translation.HERE, "EN"), defs, frozenset()
+        )
+        data = translation.prepare_language(lang, defs, "test")
+        output = io.StringIO()
+        translation.write_language(data, output, compress_font=True)
+        source = output.getvalue()
+        preparation = source.split("void prepareTranslations() {", 1)[1].split("}", 1)[
+            0
+        ]
+        for name, buffer in (
+            ("font_12x16_brieflz", "font12_out_buffer"),
+            ("font_06x08_brieflz", "font06_out_buffer"),
+        ):
+            self.assertIn(f"static uint8_t {buffer}[", source)
+            self.assertIn(
+                f"blz_depack_srcsize({name}, {buffer}, sizeof({name}));",
+                preparation,
+            )
+        self.assertNotIn("font_out_buffer", source)
+
     def test_get_bytes_from_font_index(self):
         from make_translation import get_bytes_from_font_index
 

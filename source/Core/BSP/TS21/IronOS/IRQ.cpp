@@ -24,6 +24,9 @@ extern "C" void ts21_tick_reload(void) {
 
 extern "C" void vApplicationTickHook(void) {
   static unsigned sampleTicks;
+#ifdef TS21_HEATER_TEST
+  ts21_heater_check();
+#endif
   ts21_uart_poll();
   if (++sampleTicks == configTICK_RATE_HZ / PID_TIM_HZ) {
     sampleTicks = 0;

@@ -1,5 +1,125 @@
 # Experimental TS21 IronOS port
 
+## Bounded first-heating build
+
+`ts21-ironos` still hard-disables heating. The separate opt-in below builds the
+normal IronOS UI with a real, restricted heater path:
+
+```sh
+make ts21-heater-test TS21_EXPERIMENTAL=1 CROSS_COMPILE="$HOME/ts21-toolchain/bin/riscv-none-embed-"
+make test-ts21
+```
+
+The image is
+`source/Hexfile/TS21-heater-test/TS21_font_compressed_EN.hex`, not
+`source/Hexfile/TS21_EN.hex`. Both root build targets force regeneration to
+avoid reusing another model/variant's generated settings or translations.
+The first-heating build uses the existing lossless font-compression format to
+stay inside the unchanged 35 KiB application region. Both font buffers are
+decompressed before use; their pixels and the full 128x32 UI are unchanged.
+Bootloader and settings boundaries are not expanded.
+
+**This is a supervised bring-up image, not normal soldering firmware.** Use a
+current-limited source, a nonflammable holder and an independent temperature
+probe. Verify reset/fault-off and the PA10 gate expiry with the cartridge
+disconnected before a powered cartridge test. Do not touch the tip to check
+whether this image heats. The software wattage and temperature limits depend
+on stock-derived ADC conversions; they are not calibrated measurements, a
+hardware current regulator, or protection against a failed-short power device.
+No active USB-PD request is sent, and passive UART telemetry is not treated as
+proof of a power contract.
+
+On each boot it starts unarmed at the normal home screen. Saved autostart,
+boost and power-bank keepalive are overridden in RAM, and the setpoint is
+limited to 80 C (176 F). A bottom-button press/release from home is required
+to arm heating; the top button still opens settings. Heating is only permitted
+in the ordinary soldering mode, with a positive target and fresh GUI activity.
+The screen stays awake during this bench test.
+
+The estimated output is capped at **2 W**, independently of the user's voltage
+calibration or requested PWM, and the driver refuses further output at an
+indicated 80 C even if a keepalive request bypasses the controller.
+The controller is the existing PID template with
+proportional gain 0.1 W/C and zero integral/derivative gains; no invented thermal
+mass or inertia is used. Requests consume a valid sensor sample no older than
+20 ms. Each accepted request produces at most a 120 ms gate pulse, with a
+150 ms software command deadline. Both tasks and interrupt execution may stop
+without extending that hardware pulse. A missing GUI update for 500 ms also
+removes permission to heat.
+
+This image accepts measured resistance from 1.0 through 10.0 ohms and input
+voltage from 4.5 through 21.0 V; these are conservative test acceptance bounds,
+not claimed cartridge specifications. Short/open resistance, invalid sensors,
+invalid supply, handle temperature outside 0..60 C and tip temperature at or
+above 90 C inhibit output. Faults latch until reboot. If the indicated tip
+temperature has not risen at least 3 C after 5 seconds, it stops. Regardless of
+temperature response, the session ends 10 seconds after its first nonzero
+request; exiting/reentering soldering does not renew that allowance.
+The existing IronOS thermal-protection warning is used for these latched stops,
+including the test-session timeout; that warning does not by itself establish
+that physical thermal runaway occurred. Unplug after recording the response.
+
+### Heater evidence and implementation
+
+Stock v1.5.0 sets PA10 immediately before heating at `0x0800BA7E`, and clears it
+at `0x080075EE` before the two-phase ADC sample and at `0x0800BB62` when stopping.
+Its `0x08008E70` setup uses PA6 / TIM3 channel 1, active-high PWM1, prescaler 0,
+period 959 at 96 MHz: a 100 kHz carrier. This port uses period 639 at its
+64 MHz timer clock. TIM3 outputs are off during all five ADC measurements.
+
+The stock routine at `0x0800BBF4` subtracts the low-phase ADC1 reading from
+the high-phase reading, divides by 177 and multiplies by 1000 to obtain
+milliohms. The divisor's float value is stored at stock flash `0x0800F374`.
+The port computes tenths of an ohm with integer arithmetic, rounding down.
+It bounds PWM using `P = V^2 / R`, rounding voltage up; changing the saved
+voltage calibration cannot increase this raw-ADC-based ceiling. No resistance
+is inferred from cartridge marketing or copied from another board.
+ADC4's stock threshold of 1999 is associated with stand state, not verified
+heater-current measurement, and is not repurposed as a current sensor.
+
+PA10 is additionally assigned to the documented TIM1 channel 3 alternate
+function. This independent timer uses a 1 kHz count, PWM2 with compare 1,
+period 120 and one-pulse mode. The gate is low initially, high for counts
+1..120, and low again when the timer stops at the update. This is a new
+fail-safe addition, not a claim that the stock firmware already implements it.
+Only TIM3 CH1 and TIM1 CH3 are enabled; inherited remapping/timer state is reset
+while the gate is low. Sampling, settings writes, reboot and trap paths inhibit
+output. Settings inhibition occurs after masking interrupts, so a task switch
+cannot rearm it between shutdown and flash programming.
+
+The MCU's independent watchdog is configured to a nominal 500 ms at 40 kHz
+LSI. The finite PA10 pulse, not idle-task watchdog refresh, bounds a stalled
+controller's output. The native tests cover all duty/mode combinations, raw
+power ceilings, sample consumption/age, GPIO/timer sequencing, invalid sensors,
+open/short resistance, supply/temperature bounds, command expiry, no-rise and
+session expiry across microsecond rollover. Power history uses the accepted
+timer duty's raw-ADC-based power estimate, rather than a second lossy conversion
+through eight-bit PWM or reporting rejected requests as delivered power.
+
+The optional actual-ELF emulator also exercises the real GUI and PID task:
+
+```sh
+python3 source/Core/BSP/TS21/tools/emulate_boot.py \
+  source/Hexfile/TS21-heater-test/TS21_font_compressed_EN.elf \
+  --prefix "$HOME/ts21-toolchain/bin/riscv-none-embed-" \
+  --inherited-interrupt --max-frame-us 60000 \
+  --check-heater short --instructions 160000000
+```
+
+Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `no-rise` and `session`, and
+exercise both interrupt-inherited and reset-context entry. It seeds saved
+autostart/boost/keepalive, verifies unarmed startup, presses/releases the real
+bottom GPIO input, and requires bounded nonzero output before fault injection.
+It also ages the cold soldering screen's inactivity timestamps and rejects
+display blanking in this bench variant.
+Fault runs require output inhibition and the ordinary protection-warning UI;
+the stall run advances only the timer model after CPU execution is stopped.
+No-rise/session runs age the session timestamp without skipping scheduler
+execution; they are not five/ten-second hardware endurance tests.
+Compressed font buffers are compared byte-for-byte against host decompression.
+This remains instruction/peripheral simulation, not electrical or thermal
+validation of a TS21.
+
 ## Normal IronOS, heater disabled
 
 `make ts21-ironos TS21_EXPERIMENTAL=1 CROSS_COMPILE=<prefix>` builds the real
@@ -13,8 +133,9 @@ diagnostic was accepted by the TS21 bootloader (`.rdy`) and booted on one device
 Its `A1/C8` display orientation was upside down. The IronOS target uses the
 stock panel mapping: `A0/C0/D3 30` normally, `A1/C8/D3 10` when rotated, and
 sequential COM wiring. The full normal UI is now confirmed on the device.
-The revised physical button mapping, responsiveness, sensor accuracy and
-electrical heater inhibition still require confirmation.
+The user has also confirmed that the revised UI looks good and the temperature
+reading responds to gentle external warming. Sensor accuracy and electrical
+heater inhibition still require independent confirmation.
 
 The first full IronOS image was subsequently accepted as `I21OS.rdy`: 99,985
 Intel HEX bytes containing 35,524 application bytes, within the 35,840-byte
@@ -92,13 +213,37 @@ frame transfer; the 64 MHz/faster-bus image takes 37-39 ms and passes the same
 panel refresh rates or guaranteed button latency. The new image contains 35,732
 application bytes, with HEX SHA-256
 `df699ef30a5801bcb8ca4e6932343def7715835f18ebd73441b81947f1d59b95`.
-Its clock, responsiveness and button assignment still need on-device confirmation.
+This image was accepted as `I21FAST.rdy` (100,570 Intel HEX bytes), after which
+the user confirmed the improved UI and a low-temperature response. This is not
+a measured clock check or temperature calibration.
 
-The heater lockout is unconditional in `setTipPWM()`: every requested duty cycle
+Cold-tip bench testing then exposed the normal screen-blanking policy: below
+50 C, a nonzero motion-sensitivity setting enables blanking after one minute
+without movement or button activity. This port has no movement detection to
+wake the screen. Heater-disabled builds now keep the GUI display on so external
+temperature tests remain visible. Ordinary heating-enabled builds retain their
+existing blanking policy; no settings are reset and the heater lockout is unchanged.
+Unplug the bench device when finished to avoid unnecessarily leaving the OLED on.
+
+Add `--check-cold-display` to the emulator command to exercise this case. It seeds
+saved motion sensitivity and autostart settings, enters the real soldering UI,
+and ages the two activity timestamps by 61 seconds without skipping scheduler
+ticks. It requires the display to stay on for three subsequent redraws and
+rejects an OLED-off command. The preceding image reproduces the reported blanking;
+the corrected image stays on. This is a controlled inactivity-state simulation,
+not a minute-long hardware endurance test.
+
+An earlier screen-awake-only candidate contained 35,640 application bytes; its HEX SHA-256 is
+`bcd1b9841b880f62d3ff1b54553e168d60da0a7faab66c4201f888ae7224abd3`.
+That candidate was not flashed. The first-heating variant also includes this
+display correction; its on-device behavior still needs confirmation.
+
+In the default `ts21-ironos` build, the heater lockout is unconditional in
+`setTipPWM()`: every requested duty cycle
 and both PWM modes disable TIM3 and hold PA6/PA10 low. `HEATER_DISABLED` also
 forces IronOS's requested and reported output power to zero. Settings, autostart,
-boost and power-bank keepalive cannot enable it. There is no build switch for
-enabling the TS21 heater.
+boost and power-bank keepalive cannot enable it. Only the separate
+`ts21-heater-test` target above includes a heater-enable path.
 
 Build with the WCH toolchain below, Python dependencies from
 `Translations/requirements.txt`, GNU Make and native C/C++ compilers:
@@ -120,7 +265,7 @@ the soldering-screen action, 400 ms holds and simultaneous-button release.
 The image-tool tests check the protected memory ranges and exact HEX contents.
 
 The equivalent source target is
-`make -C source model=TS21 TS21_EXPERIMENTAL=1 COMPILER_PREFIX=<prefix-without-final-dash> Hexfile/TS21_EN.hex`.
+`make -B -C source model=TS21 TS21_EXPERIMENTAL=1 TS21_HEATER_TEST=0 COMPILER_PREFIX=<prefix-without-final-dash> Hexfile/TS21_EN.hex`.
 `HOST_PYTHON` can select a virtual environment. TS21 is not included in release
 matrices. Without the experimental opt-in even an existing image is refused.
 The same strict ELF/HEX byte comparison and protected memory bounds apply.
@@ -161,8 +306,9 @@ settings at `0x0800FF00` are not erased. Writes are bounded, read back and check
 failures inhibit the heater and latch a flash error. Like other single-page
 IronOS settings implementations, this is not power-loss-atomic.
 
-Motion/private bootloader services, active PD negotiation, heater drive,
-cartridge resistance/short detection and custom boot logos are not implemented.
+Motion/private bootloader services, active PD negotiation and custom boot logos
+are not implemented. Heater drive and resistance fault checks are restricted
+to the first-heating variant described above; there is no full-power TS21 port.
 Power telemetry remains receive-only; no high-voltage request is sent.
 Automatic rotation and motion sleep are disabled. Do not infer heating readiness
 from a booting GUI or a plausible temperature number.

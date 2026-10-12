@@ -4,6 +4,10 @@
 #include "main.hpp"
 #include "ts21.h"
 #include <limits.h>
+#ifdef TS21_HEATER_TEST
+#include "OperatingModes.h"
+#include "Settings.h"
+#endif
 
 volatile struct TS21Status ts21_status;
 const uint16_t             powerPWM = 255;
@@ -14,6 +18,22 @@ static SemaphoreHandle_t sampleLock;
 static TS21Sample        sensors;
 static bool              sensorsValid;
 static int16_t           handleTemperature;
+
+#ifdef TS21_HEATER_TEST
+static volatile bool     heaterArmed;
+static bool              heaterButtonPressed;
+static volatile uint32_t lastGUIRead;
+
+bool ts21_heater_permitted(void) {
+  return heaterArmed && currentOperatingMode == OperatingMode::Soldering && currentTempTargetDegC > 0 && heaterThermalRunawayCounter <= 8 && (uint32_t)(ts21_micros() - lastGUIRead) < 500000U;
+}
+
+void ts21_heater_failed(void) {
+  heaterArmed                 = false;
+  currentTempTargetDegC       = 0;
+  heaterThermalRunawayCounter = 255;
+}
+#endif
 
 static void sampleSensors() {
   configASSERT(xSemaphoreTake(sampleLock, portMAX_DELAY) == pdTRUE);
@@ -64,7 +84,12 @@ void BSPInit(void) {
 
 void preRToSInit() { BSPInit(); }
 void postRToSInit() {}
-void resetWatchdog() { ts21_watchdog_refresh(); }
+void resetWatchdog() {
+#ifdef TS21_HEATER_TEST
+  ts21_heater_check();
+#endif
+  ts21_watchdog_refresh();
+}
 
 int16_t getHandleTemperature(uint8_t) { return sensorsValid ? handleTemperature : INT16_MAX; }
 
@@ -83,7 +108,23 @@ uint16_t getInputVoltageX10(uint16_t divisor, uint8_t) {
   return ts21_input_voltage_x10(sensors.input) * VOLTAGE_DIV / divisor;
 }
 
-uint8_t getButtonA() { return (ts21_buttons() & 1) != 0; }
+uint8_t getButtonA() {
+  const uint8_t buttons = ts21_buttons();
+#ifdef TS21_HEATER_TEST
+  lastGUIRead = ts21_micros();
+  if (currentOperatingMode == OperatingMode::HomeScreen) {
+    if (buttons == 1) {
+      heaterButtonPressed = true;
+    } else {
+      heaterArmed |= buttons == 0 && heaterButtonPressed;
+      heaterButtonPressed = false;
+    }
+  } else {
+    heaterButtonPressed = false;
+  }
+#endif
+  return (buttons & 1) != 0;
+}
 uint8_t getButtonB() { return (ts21_buttons() & 2) != 0; }
 
 void delay_ms(uint16_t count) {
@@ -96,28 +137,52 @@ void delay_ms(uint16_t count) {
 }
 
 void reboot() {
-  ts21_heater_inhibit();
   __asm volatile("csrrci zero, mstatus, 8" ::: "memory");
+  ts21_heater_inhibit();
   *(volatile uint32_t *)0xE000E048 = 0xBEEF0080;
   ts21_fault(TS21_ERROR_TRAP);
 }
 
 void     unstick_I2C() { ts21_fault(TS21_ERROR_I2C_BUS); }
 void     showBootLogoIfavailable() {}
-void     showBootLogo() {}
+void     showBootLogo() {
+#ifdef TS21_HEATER_TEST
+  // Apply the first-heating limits before the GUI examines saved autostart/boost settings.
+  setSettingValue(SettingsOptions::AutoStartMode, 0);
+  setSettingValue(SettingsOptions::BoostTemp, 0);
+  setSettingValue(SettingsOptions::KeepAwakePulse, 0);
+  setSettingValue(SettingsOptions::SolderingTemp, getSettingValue(SettingsOptions::TemperatureInF) ? MAX_TEMP_F : MAX_TEMP_C);
+#endif
+}
 bool     getHallSensorFitted() { return false; }
 int16_t  getRawHallEffect() { return 0; }
 bool     getIsPoweredByDCIN() { return false; }
 void     log_system_state(int32_t) {}
 bool     getFUS302IRQLow() { return false; }
 void     power_check() { ts21_uart_poll(); }
-uint8_t  getTipResistanceX10() { return 0; } // Not measured; this build never drives the cartridge.
+uint8_t  getTipResistanceX10() { return sensorsValid ? ts21_tip_resistance_x10(&sensors) : 0; }
+#ifndef TIP_CONTROL_PID
 uint16_t getTipThermalMass() { return 0; }
 uint16_t getTipInertia() { return 0; }
+#endif
 uint8_t  preStartChecks() { return sensorsValid; }
 uint8_t  preStartChecksDone() { return sensorsValid; }
-bool     isTipShorted() { return false; }
-bool     isTipDisconnected() { return !sensorsValid || sensors.tip == 0 || sensors.tip >= 4090; }
+bool     isTipShorted() {
+#ifdef TS21_HEATER_TEST
+  return sensorsValid && sensors.tip < 4090 && sensors.tip_probe < 4090 && ts21_tip_resistance_x10(&sensors) < TS21_HEATER_MIN_R_X10;
+#else
+  return false;
+#endif
+}
+bool isTipDisconnected() {
+#ifdef TS21_HEATER_TEST
+  const uint8_t resistance = getTipResistanceX10();
+  if (ts21_status.errors || resistance < TS21_HEATER_MIN_R_X10 || resistance > TS21_HEATER_MAX_R_X10) {
+    return true;
+  }
+#endif
+  return !sensorsValid || sensors.tip == 0 || sensors.tip >= 4090;
+}
 void     setStatusLED(const enum StatusLED) {}
 void     setBuzzer(bool) {}
 
@@ -126,12 +191,18 @@ uint64_t getDeviceID() {
   return ((uint64_t)uid[1] << 32) | uid[0];
 }
 
-TemperatureType_t getCustomTipMaxInC() { return 500; }
+TemperatureType_t getCustomTipMaxInC() {
+#ifdef TS21_HEATER_TEST
+  return TS21_HEATER_TARGET_C;
+#else
+  return 500;
+#endif
+}
 TemperatureType_t TipThermoModel::convertTipRawADCToDegC(uint16_t rawADC) {
   int16_t value;
   if (!ts21_tip_delta_c(rawADC, &value)) {
     ts21_status.errors |= TS21_ERROR_SENSOR;
-    return getCustomTipMaxInC();
+    return 500;
   }
   return value;
 }

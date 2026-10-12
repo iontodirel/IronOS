@@ -99,6 +99,7 @@ list:
 	@echo "  * tests              - run set of checks, linters & tests (equivalent of github CI IronOS project settings for push trigger)"
 	@echo "  * test-ts21          - run TS21 hardware and IronOS lockout tests (native C/C++ compilers)"
 	@echo "  * ts21-ironos        - build normal IronOS with the TS21 heater hard-disabled (requires TS21_EXPERIMENTAL=1)"
+	@echo "  * ts21-heater-test   - build the bounded first-heating variant (requires TS21_EXPERIMENTAL=1)"
 	@echo "  * ts21-bringup       - build the unvalidated TS21 no-heater ELF (requires TS21_EXPERIMENTAL=1; see source/Core/BSP/TS21/README.md)"
 	@echo "  * ts21-bringup-hex   - export a checked diagnostic HEX for cartridge-removed bench testing (requires TS21_EXPERIMENTAL=1)"
 	@echo "  * clean-build        - delete generated files & dirs produced during builds EXCEPT docker image & its build cache"
@@ -205,8 +206,12 @@ ts21-bringup-hex:
 	$(MAKE) -C source/Core/BSP/TS21 probe-hex EXPERIMENTAL=$(TS21_EXPERIMENTAL)
 
 ts21-ironos:
-	$(MAKE) -C source model=TS21 TS21_EXPERIMENTAL=$(TS21_EXPERIMENTAL) \
+	$(MAKE) -B -C source model=TS21 TS21_EXPERIMENTAL=$(TS21_EXPERIMENTAL) TS21_HEATER_TEST=0 \
 		$(if $(CROSS_COMPILE),COMPILER_PREFIX=$(patsubst %-,%,$(CROSS_COMPILE))) Hexfile/TS21_EN.hex
+
+ts21-heater-test:
+	$(MAKE) -B -C source model=TS21 TS21_EXPERIMENTAL=$(TS21_EXPERIMENTAL) TS21_HEATER_TEST=1 \
+		$(if $(CROSS_COMPILE),COMPILER_PREFIX=$(patsubst %-,%,$(CROSS_COMPILE))) Hexfile/TS21-heater-test/TS21_font_compressed_EN.hex
 
 # former scripts/ci/buildAll.sh - all in one to build all firmware & place the produced binaries into one output directory
 build-all:

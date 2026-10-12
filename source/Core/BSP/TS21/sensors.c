@@ -1,5 +1,13 @@
 #include "ts21.h"
 
+uint8_t ts21_tip_resistance_x10(const struct TS21Sample *sample) {
+  if (sample == NULL || sample->tip == 0 || sample->tip >= 4090 || sample->tip_probe >= 4090 || sample->tip_probe <= sample->tip) {
+    return 0;
+  }
+  // Stock 0x0800BBF4: R (ohms) = (ADC1 high phase - ADC1 low phase) / 177.
+  return (uint8_t)(((uint32_t)sample->tip_probe - sample->tip) * 10 / 177);
+}
+
 bool ts21_tip_delta_c(uint16_t raw, int16_t *value) {
   if (value == NULL || raw == 0 || raw >= 4095) {
     return false;

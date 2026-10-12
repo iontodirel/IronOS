@@ -39,6 +39,19 @@ static unsigned        uart_size;
 static unsigned        uart_position;
 static uint32_t        uart_error;
 static uint16_t        adc_value;
+#ifdef TS21_HEATER_TEST
+static bool              heater_permitted;
+static unsigned          heater_failures;
+static bool              use_adc_fixture;
+static struct TS21Sample adc_fixture;
+static uint64_t          gate_started_ticks;
+
+bool ts21_heater_permitted(void) { return heater_permitted; }
+void ts21_heater_failed(void) {
+  ++heater_failures;
+  heater_permitted = false;
+}
+#endif
 
 static uint32_t *reg(uint32_t address) {
   for (unsigned i = 0; i < register_count; ++i) {
@@ -52,7 +65,31 @@ static uint32_t *reg(uint32_t address) {
   return &registers[register_count++].value;
 }
 
+#ifdef TS21_HEATER_TEST
+static void advance_gate(void) {
+  if (*reg(TS21_TIM1) & 1U) {
+    const uint64_t count = (ticks - gate_started_ticks) * 8U / (*reg(TS21_TIM1 + 0x28) + 1U);
+    if (count > *reg(TS21_TIM1 + 0x2C) && (*reg(TS21_TIM1) & 8U)) {
+      *reg(TS21_TIM1) &= ~1U;
+      *reg(TS21_TIM1 + 0x24) = 0;
+    } else {
+      *reg(TS21_TIM1 + 0x24) = (uint32_t)count;
+    }
+  }
+}
+
+static bool gate_high(void) {
+  advance_gate();
+  return ((*reg(TS21_GPIOA + 4) >> 8) & 15) == 0xB && (*reg(TS21_TIM1 + 0x44) & 0x8000) && (*reg(TS21_TIM1 + 0x20) & 0x100) && (*reg(TS21_TIM1 + 0x24) >= *reg(TS21_TIM1 + 0x3C));
+}
+#endif
+
 uint32_t ts21_mmio_read(uint32_t address) {
+#ifdef TS21_HEATER_TEST
+  if (address >= TS21_TIM1 && address < TS21_TIM1 + 0x50) {
+    advance_gate();
+  }
+#endif
   if (address == TS21_RCC) {
     uint32_t result = *reg(address) & ~(2U | (1U << 25));
     if (clock_ready) {
@@ -112,6 +149,19 @@ void ts21_mmio_write(uint32_t address, uint32_t value) {
   assert(write_count < sizeof(writes) / sizeof(writes[0]));
   writes[write_count++] = (struct Register){address, value};
   *reg(address)         = value;
+#ifdef TS21_HEATER_TEST
+  if ((address == TS21_RCC + 0x0C && (value & (1U << 11))) || (address == TS21_RCC + 0x10 && (value & 2))) {
+    const uint32_t base = address == TS21_RCC + 0x0C ? TS21_TIM1 : TS21_TIM3;
+    for (unsigned i = 0; i < register_count; ++i) {
+      if (registers[i].address >= base && registers[i].address < base + 0x50) {
+        registers[i].value = 0;
+      }
+    }
+  }
+  if (address == TS21_TIM1 && (value & 1U)) {
+    gate_started_ticks = ticks;
+  }
+#endif
   if (address == TS21_GPIOA + 0x10) {
     *reg(TS21_GPIOA + 12) |= value;
   } else if (address == TS21_GPIOA + 0x14) {
@@ -150,6 +200,29 @@ void ts21_mmio_write(uint32_t address, uint32_t value) {
   } else if (address == TS21_ADC1 + 8 && (value & 0x400000U) && conversion_complete) {
     *reg(TS21_ADC1) |= 2;
     *reg(TS21_ADC1 + 0x4C) = adc_value;
+#ifdef TS21_HEATER_TEST
+    if (use_adc_fixture) {
+      assert(!gate_high());
+      assert(*reg(TS21_TIM3) == 0);
+      const unsigned channel = *reg(TS21_ADC1 + 0x34);
+      switch (channel) {
+      case 1:
+        *reg(TS21_ADC1 + 0x4C) = (*reg(TS21_GPIOA + 12) & 1U) ? adc_fixture.tip_probe : adc_fixture.tip;
+        break;
+      case 2:
+        *reg(TS21_ADC1 + 0x4C) = adc_fixture.handle;
+        break;
+      case 4:
+        *reg(TS21_ADC1 + 0x4C) = adc_fixture.auxiliary;
+        break;
+      case 9:
+        *reg(TS21_ADC1 + 0x4C) = adc_fixture.input;
+        break;
+      default:
+        assert(false);
+      }
+    }
+#endif
   } else if (address == TS21_SYSTICK + 8 || address == TS21_SYSTICK + 12) {
     ticks = ((uint64_t)*reg(TS21_SYSTICK + 12) << 32) | *reg(TS21_SYSTICK + 8);
   }
@@ -172,6 +245,11 @@ static void reset(void) {
   uart_size = uart_position = 0;
   uart_error                = 0;
   adc_value                 = 0xFABC;
+#ifdef TS21_HEATER_TEST
+  heater_permitted = use_adc_fixture = false;
+  heater_failures                    = 0;
+  gate_started_ticks                 = 0;
+#endif
   *reg(TS21_GPIOA + 12)     = TS21_HEATER_EN | TS21_HEATER_IN;
   *reg(TS21_TIM3)           = 1;
   *reg(TS21_TIM3 + 0x20)    = 1;
@@ -515,7 +593,217 @@ static void test_sensor_conversion(void) {
   assert(ts21_input_voltage_x10(0) == 0);
   assert(ts21_input_voltage_x10(1) == 0);
   assert(ts21_input_voltage_x10(1451) == 100);
+  struct TS21Sample sample = {.tip_probe = 934, .tip = 580};
+  assert(ts21_tip_resistance_x10(&sample) == 20);
+  for (unsigned delta = 0; delta <= 3500; ++delta) {
+    sample.tip_probe = (uint16_t)(580 + delta);
+    assert(ts21_tip_resistance_x10(&sample) == delta * 10 / 177);
+  }
+  sample.tip_probe = 4095;
+  assert(ts21_tip_resistance_x10(&sample) == 0);
+  sample.tip_probe = 579;
+  assert(ts21_tip_resistance_x10(&sample) == 0);
+  sample.tip = 0;
+  assert(ts21_tip_resistance_x10(&sample) == 0);
+  assert(ts21_tip_resistance_x10(NULL) == 0);
 }
+
+#ifdef TS21_HEATER_TEST
+static void prepare_heater(void) {
+  reset();
+  assert(ts21_board_init());
+  assert(*reg(TS21_IWDG + 4) == 3 && *reg(TS21_IWDG + 8) == 624);
+  use_adc_fixture  = true;
+  adc_fixture      = (struct TS21Sample){.tip_probe = 934, .tip = 580, .handle = 2864, .input = 725, .auxiliary = 100};
+  heater_permitted = true;
+  write_count      = 0;
+}
+
+static void sample_heater(void) {
+  struct TS21Sample sample;
+  assert(ts21_sample_sensors(&sample));
+}
+
+static void assert_heater_off(void) {
+  assert(!gate_high());
+  assert(*reg(TS21_TIM3) == 0);
+  assert(*reg(TS21_TIM3 + 0x20) == 0);
+  assert(getTipX10Watts() == 0);
+}
+
+static void test_bounded_heater(void) {
+  for (unsigned fast = 0; fast < 2; ++fast) {
+    for (unsigned pulse = 0; pulse < 256; ++pulse) {
+      prepare_heater();
+      sample_heater();
+      setTipPWM((uint8_t)pulse, fast != 0);
+      assert(ts21_status.errors == 0 && heater_failures == 0);
+      const uint32_t compare = *reg(TS21_TIM3 + 0x34);
+      assert(compare <= pulse * TS21_HEATER_PERIOD / 255U);
+      assert(compare * 50U * 50U <= TS21_HEATER_POWER_X10 * 20U * TS21_HEATER_PERIOD);
+      if (compare) {
+        assert(getTipX10Watts() == compare * 125U / TS21_HEATER_PERIOD);
+        assert(*reg(TS21_TIM3 + 0x28) == 0);
+        assert(*reg(TS21_TIM3 + 0x2C) == 639);
+        assert(*reg(TS21_TIM3 + 0x18) == 0x68);
+        assert(*reg(TS21_TIM1 + 0x28) == 63999);
+        assert(*reg(TS21_TIM1 + 0x2C) == TS21_HEATER_WINDOW_MS);
+        assert(*reg(TS21_TIM1 + 0x3C) == 1);
+        assert(*reg(TS21_TIM1 + 0x1C) == 0x78);
+        assert(*reg(TS21_TIM1 + 0x20) == 0x100);
+        assert(*reg(TS21_TIM1 + 0x44) == 0x8000);
+        assert(*reg(TS21_TIM1) == 0x89);
+        assert(!gate_high());
+        ticks += 1000U * TS21_TIMER_TICKS_PER_US;
+        assert(gate_high());
+        ticks += TS21_HEATER_WINDOW_MS * 1000U * TS21_TIMER_TICKS_PER_US;
+        // No firmware call is needed for the one-pulse gate to return low.
+        assert(!gate_high());
+        assert(!(*reg(TS21_TIM1) & 1U));
+        assert(getTipX10Watts() == 0);
+      }
+      setTipPWM(0, false);
+      assert_heater_off();
+    }
+  }
+
+  const uint16_t voltages[]    = {654, 725, 1451, 2900, 3045};
+  const unsigned resistances[] = {10, 20, 40, 100};
+  for (unsigned v = 0; v < sizeof(voltages) / sizeof(voltages[0]); ++v) {
+    for (unsigned r = 0; r < sizeof(resistances) / sizeof(resistances[0]); ++r) {
+      prepare_heater();
+      adc_fixture.input     = voltages[v];
+      adc_fixture.tip_probe = adc_fixture.tip + (uint16_t)((resistances[r] * 177U + 9U) / 10U);
+      sample_heater();
+      setTipPWM(255, false);
+      assert(ts21_status.errors == 0);
+      const uint32_t voltage = ts21_input_voltage_x10(adc_fixture.input) + 1U;
+      const uint32_t compare = *reg(TS21_TIM3 + 0x34);
+      assert(compare > 0 && compare <= TS21_HEATER_PERIOD * 85 / 100);
+      assert(compare * voltage * voltage <= TS21_HEATER_POWER_X10 * ts21_tip_resistance_x10(&adc_fixture) * TS21_HEATER_PERIOD);
+      assert(getTipX10Watts() > 0 && getTipX10Watts() <= TS21_HEATER_POWER_X10);
+    }
+  }
+}
+
+static void test_heater_faults(void) {
+  prepare_heater();
+  adc_fixture.tip       = 858;
+  adc_fixture.tip_probe = 1212;
+  sample_heater();
+  setTipPWM(255, false);
+  assert(ts21_status.errors == 0);
+  assert_heater_off();
+
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  assert(!ts21_sample_sensors(NULL));
+  assert(ts21_status.errors & TS21_ERROR_ARGUMENT);
+  assert_heater_off();
+
+  prepare_heater();
+  sample_heater();
+  heater_permitted = false;
+  setTipPWM(255, false);
+  assert_heater_off();
+  require_inhibited();
+
+  prepare_heater();
+  sample_heater();
+  ticks += (TS21_HEATER_FRESH_US + 1U) * TS21_TIMER_TICKS_PER_US;
+  setTipPWM(255, false);
+  assert(ts21_status.errors & TS21_ERROR_HEATER_STALE);
+  assert_heater_off();
+
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  setTipPWM(255, false); // A command cannot reuse the preceding sample.
+  assert(ts21_status.errors & TS21_ERROR_HEATER_STALE);
+  assert_heater_off();
+
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  ticks += TS21_HEATER_COMMAND_US * TS21_TIMER_TICKS_PER_US;
+  ts21_heater_check();
+  assert(ts21_status.errors & TS21_ERROR_HEATER_STALE);
+  assert_heater_off();
+
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  ts21_status.errors |= TS21_ERROR_FLASH;
+  ts21_heater_check();
+  assert_heater_off();
+  sample_heater();
+  setTipPWM(255, false);
+  assert_heater_off();
+
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  heater_permitted = false;
+  ts21_heater_check();
+  assert_heater_off();
+
+  const struct TS21Sample bad[] = {
+      { .tip_probe = 600,  .tip = 580, .handle = 2864,  .input = 725},
+      {.tip_probe = 4095,  .tip = 580, .handle = 2864,  .input = 725},
+      { .tip_probe = 934,  .tip = 580, .handle = 2864,  .input = 500},
+      { .tip_probe = 934,  .tip = 580, .handle = 2864, .input = 3500},
+      { .tip_probe = 934,  .tip = 580,    .handle = 0,  .input = 725},
+      {.tip_probe = 1434, .tip = 1080, .handle = 2864,  .input = 725},
+      { .tip_probe = 934,  .tip = 580,  .handle = 500,  .input = 725},
+  };
+  const uint32_t errors[] = {TS21_ERROR_HEATER_SHORT, TS21_ERROR_HEATER_OPEN, TS21_ERROR_HEATER_SUPPLY, TS21_ERROR_HEATER_SUPPLY, TS21_ERROR_SENSOR, TS21_ERROR_HEATER_TEMP, TS21_ERROR_HEATER_TEMP};
+  for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+    prepare_heater();
+    sample_heater();
+    setTipPWM(255, false);
+    adc_fixture = bad[i];
+    sample_heater();
+    assert(ts21_status.errors & errors[i]);
+    assert(heater_failures != 0);
+    assert_heater_off();
+    adc_fixture = (struct TS21Sample){.tip_probe = 934, .tip = 580, .handle = 2864, .input = 725};
+    sample_heater();
+    heater_permitted = true;
+    setTipPWM(255, false);
+    assert_heater_off();
+  }
+
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  conversion_complete = false;
+  struct TS21Sample sample;
+  assert(!ts21_sample_sensors(&sample));
+  assert(ts21_status.errors & TS21_ERROR_ADC);
+  assert_heater_off();
+
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  ticks += 5000000ULL * TS21_TIMER_TICKS_PER_US;
+  sample_heater();
+  assert(ts21_status.errors & TS21_ERROR_HEATER_NO_RISE);
+  assert_heater_off();
+
+  prepare_heater();
+  ticks = ((uint64_t)UINT32_MAX - 5000000U) * TS21_TIMER_TICKS_PER_US;
+  sample_heater();
+  setTipPWM(255, false);
+  ticks += (uint64_t)TS21_HEATER_SESSION_US * TS21_TIMER_TICKS_PER_US;
+  ts21_heater_check();
+  assert(ts21_status.errors & TS21_ERROR_HEATER_TIMEOUT);
+  assert_heater_off();
+  const unsigned failures = heater_failures;
+  ts21_heater_check();
+  assert(heater_failures == failures);
+}
+#endif
 
 int main(void) {
   test_protocol();
@@ -528,6 +816,11 @@ int main(void) {
   test_sensor_sequence();
   test_sensor_conversion();
   test_all_pwm_requests_inhibited();
+#ifdef TS21_HEATER_TEST
+  test_bounded_heater();
+  test_heater_faults();
+  puts("TS21 heater tests passed: measured resistance, power cap, finite hardware gate, freshness, faults and session limits");
+#endif
   puts("TS21 host tests passed: protocol, inhibit ordering, button mapping, clocks, ADC, UART, I2C and bounded failures");
   return 0;
 }

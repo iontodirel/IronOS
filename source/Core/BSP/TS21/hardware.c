@@ -10,6 +10,40 @@ static bool                adc_ready;
 static int16_t             adc_offset;
 static struct TS21PDParser pd_parser;
 
+static uint32_t irq_save(void) {
+#if defined(TS21_IRONOS) && !defined(TS21_HOST_TEST)
+  uint32_t state;
+  __asm volatile("csrrci %0, mstatus, 8" : "=r"(state)::"memory");
+  return state;
+#else
+  return 0;
+#endif
+}
+
+static void irq_restore(uint32_t state) {
+#if defined(TS21_IRONOS) && !defined(TS21_HOST_TEST)
+  __asm volatile("csrw mstatus, %0" ::"r"(state) : "memory");
+#else
+  (void)state;
+#endif
+}
+
+#ifdef TS21_HEATER_TEST
+static bool     heater_sample_ready;
+static bool     heater_session_started;
+static bool     heater_active;
+static bool     heater_saw_rise;
+static uint32_t heater_sample_us;
+static uint32_t heater_session_us;
+static uint32_t heater_command_us;
+static uint32_t heater_sample_error;
+static uint32_t heater_full_power_x10;
+static uint16_t heater_max_compare;
+static int16_t  heater_temperature;
+static int16_t  heater_start_temperature;
+static uint8_t  heater_power_x10;
+#endif
+
 static void modify(uint32_t address, uint32_t clear, uint32_t set) { ts21_mmio_write(address, (ts21_mmio_read(address) & ~clear) | set); }
 
 static void gpio_mode(uint32_t port, unsigned pin, uint32_t mode) {
@@ -28,25 +62,165 @@ static bool wait_bits(uint32_t address, uint32_t mask, uint32_t expected) {
 }
 
 void ts21_heater_inhibit(void) {
+  const uint32_t state = irq_save();
   modify(TS21_RCC + 0x18, 0, 4);
   // Stock firmware clears PA10 before sampling the thermocouple.
   ts21_mmio_write(TS21_GPIOA + 0x14, TS21_HEATER_EN);
   gpio_mode(TS21_GPIOA, 10, 2);
-
+#ifdef TS21_HEATER_TEST
+  modify(TS21_RCC + 0x18, 0, 1U << 11);
+  ts21_mmio_write(TS21_TIM1 + 0x44, 0);
+  ts21_mmio_write(TS21_TIM1 + 0x20, 0);
+  ts21_mmio_write(TS21_TIM1, 0);
+  heater_sample_ready = false;
+  heater_active       = false;
+  heater_power_x10    = 0;
+#endif
   modify(TS21_RCC + 0x1C, 0, 2);
   ts21_mmio_write(TS21_TIM3, 0);
   ts21_mmio_write(TS21_TIM3 + 0x20, 0);
   ts21_mmio_write(TS21_TIM3 + 0x34, 0);
   ts21_mmio_write(TS21_GPIOA + 0x14, TS21_HEATER_IN);
   gpio_mode(TS21_GPIOA, 6, 2);
+  irq_restore(state);
 }
 
 void ts21_watchdog_refresh(void) { ts21_mmio_write(TS21_IWDG, 0xAAAA); }
 
-void setTipPWM(uint8_t pulse, bool fast) {
-  (void)pulse;
-  (void)fast;
+#ifdef TS21_HEATER_TEST
+static void heater_trip(uint32_t error) {
   ts21_heater_inhibit();
+  ts21_status.errors |= error;
+  ts21_heater_failed();
+}
+
+void ts21_heater_check(void) {
+  const uint32_t state = irq_save();
+  const uint32_t now   = ts21_micros();
+  if (heater_active && (ts21_status.errors || !ts21_heater_permitted())) {
+    ts21_heater_inhibit();
+  }
+  if (heater_session_started && !(ts21_status.errors & TS21_ERROR_HEATER_TIMEOUT) && (uint32_t)(now - heater_session_us) >= TS21_HEATER_SESSION_US) {
+    heater_trip(TS21_ERROR_HEATER_TIMEOUT);
+  } else if (heater_active && (uint32_t)(now - heater_command_us) >= TS21_HEATER_COMMAND_US) {
+    heater_trip(TS21_ERROR_HEATER_STALE);
+  }
+  irq_restore(state);
+}
+
+static void heater_record_sample(const struct TS21Sample *sample) {
+  int16_t        tip, handle;
+  const uint8_t  resistance = ts21_tip_resistance_x10(sample);
+  const uint16_t voltage    = ts21_input_voltage_x10(sample->input);
+  heater_sample_error       = 0;
+  if (!ts21_tip_delta_c(sample->tip, &tip) || !ts21_handle_c_x10(sample->handle, &handle)) {
+    heater_sample_error = TS21_ERROR_SENSOR;
+  } else if (sample->tip_probe >= 4090 || sample->tip >= 4090 || resistance > TS21_HEATER_MAX_R_X10) {
+    heater_sample_error = TS21_ERROR_HEATER_OPEN;
+  } else if (resistance < TS21_HEATER_MIN_R_X10) {
+    heater_sample_error = TS21_ERROR_HEATER_SHORT;
+  } else if (voltage < TS21_HEATER_MIN_INPUT_X10 || voltage > TS21_HEATER_MAX_INPUT_X10) {
+    heater_sample_error = TS21_ERROR_HEATER_SUPPLY;
+  } else {
+    heater_temperature = tip + handle / 10;
+    if (handle < 0 || handle > 600 || heater_temperature < 0 || heater_temperature >= TS21_HEATER_CUTOFF_C) {
+      heater_sample_error = TS21_ERROR_HEATER_TEMP;
+    }
+  }
+  if (!heater_sample_error) {
+    // Round resistance down and voltage up; saved voltage calibration cannot raise this cap.
+    const uint32_t upper_voltage = voltage + 1U;
+    heater_full_power_x10        = upper_voltage * upper_voltage / resistance;
+    heater_max_compare           = (uint16_t)(TS21_HEATER_PERIOD * TS21_HEATER_POWER_X10 * resistance / (upper_voltage * upper_voltage));
+    heater_sample_us             = ts21_micros();
+    heater_sample_ready          = true;
+    if (heater_session_started) {
+      heater_saw_rise |= heater_temperature >= heater_start_temperature + 3;
+      if (!heater_saw_rise && (uint32_t)(heater_sample_us - heater_session_us) >= 5000000U) {
+        heater_sample_error = TS21_ERROR_HEATER_NO_RISE;
+      }
+    }
+  }
+  if (heater_sample_error && heater_session_started) {
+    heater_trip(heater_sample_error);
+  }
+}
+
+uint32_t getTipX10Watts(void) { return heater_active && (ts21_mmio_read(TS21_TIM1) & 1U) ? heater_power_x10 : 0; }
+#endif
+
+void setTipPWM(uint8_t pulse, bool fast) {
+  (void)fast;
+#ifdef TS21_HEATER_TEST
+  const uint32_t state = irq_save();
+  ts21_heater_check();
+  const bool     ready = heater_sample_ready;
+  const uint32_t now   = ts21_micros();
+  ts21_heater_inhibit();
+  if (!pulse || !ts21_heater_permitted()) {
+    irq_restore(state);
+    return;
+  }
+  if (ts21_status.errors || heater_sample_error || !ready || (uint32_t)(now - heater_sample_us) > TS21_HEATER_FRESH_US) {
+    heater_trip(heater_sample_error ? heater_sample_error : TS21_ERROR_HEATER_STALE);
+    irq_restore(state);
+    return;
+  }
+  if (heater_temperature >= TS21_HEATER_TARGET_C) {
+    irq_restore(state);
+    return;
+  }
+  uint32_t compare = (uint32_t)pulse * TS21_HEATER_PERIOD / 255U;
+  if (compare > heater_max_compare) {
+    compare = heater_max_compare;
+  }
+  if (compare > TS21_HEATER_PERIOD * 85 / 100) {
+    compare = TS21_HEATER_PERIOD * 85 / 100;
+  }
+  if (compare) {
+    if (!heater_session_started) {
+      heater_session_started   = true;
+      heater_session_us        = now;
+      heater_start_temperature = heater_temperature;
+    }
+    heater_command_us = now;
+    heater_active     = true;
+    heater_power_x10  = (uint8_t)(compare * heater_full_power_x10 / TS21_HEATER_PERIOD);
+
+    // Reset inherited timer/remap state. Only TIM3 CH1 (PA6) and TIM1 CH3 (PA10) are enabled.
+    modify(TS21_RCC + 0x18, 0, 1);
+    modify(0x40010004, 0xCC0, 0);
+    modify(TS21_RCC + 0x0C, 0, 1U << 11);
+    modify(TS21_RCC + 0x0C, 1U << 11, 0);
+    modify(TS21_RCC + 0x10, 0, 2);
+    modify(TS21_RCC + 0x10, 2, 0);
+
+    ts21_mmio_write(TS21_TIM3 + 0x28, 0);
+    ts21_mmio_write(TS21_TIM3 + 0x2C, TS21_HEATER_PERIOD - 1);
+    ts21_mmio_write(TS21_TIM3 + 0x34, compare);
+    ts21_mmio_write(TS21_TIM3 + 0x18, 0x68);
+    ts21_mmio_write(TS21_TIM3 + 0x14, 1);
+    ts21_mmio_write(TS21_TIM3 + 0x20, 1);
+    gpio_mode(TS21_GPIOA, 6, 0xB);
+    ts21_mmio_write(TS21_TIM3, 0x81);
+
+    // PA10 expires in hardware even if the PID, interrupts or watchdog servicing stall.
+    // PWM2 starts low, is high at counts 1..120, and returns low on the one-pulse update.
+    ts21_mmio_write(TS21_TIM1 + 0x28, TS21_CLOCK_HZ / 1000U - 1);
+    ts21_mmio_write(TS21_TIM1 + 0x2C, TS21_HEATER_WINDOW_MS);
+    ts21_mmio_write(TS21_TIM1 + 0x3C, 1);
+    ts21_mmio_write(TS21_TIM1 + 0x1C, 0x78);
+    ts21_mmio_write(TS21_TIM1 + 0x14, 1);
+    ts21_mmio_write(TS21_TIM1 + 0x20, 0x100);
+    ts21_mmio_write(TS21_TIM1 + 0x44, 0x8000);
+    gpio_mode(TS21_GPIOA, 10, 0xB);
+    ts21_mmio_write(TS21_TIM1, 0x89);
+  }
+  irq_restore(state);
+#else
+  (void)pulse;
+  ts21_heater_inhibit();
+#endif
 }
 
 uint64_t ts21_timer_now(void) {
@@ -160,14 +334,9 @@ static void uart_poll(void) {
 }
 
 void ts21_uart_poll(void) {
-#if defined(TS21_IRONOS) && !defined(TS21_HOST_TEST)
-  uint32_t state;
-  __asm volatile("csrrci %0, mstatus, 8" : "=r"(state)::"memory");
-#endif
+  const uint32_t state = irq_save();
   uart_poll();
-#if defined(TS21_IRONOS) && !defined(TS21_HOST_TEST)
-  __asm volatile("csrw mstatus, %0" ::"r"(state) : "memory");
-#endif
+  irq_restore(state);
 }
 
 static bool adc_init(void) {
@@ -248,11 +417,11 @@ bool ts21_adc_read(uint8_t channel, uint16_t *value) {
 }
 
 bool ts21_sample_sensors(struct TS21Sample *sample) {
+  ts21_heater_inhibit();
   if (sample == NULL) {
     ts21_status.errors |= TS21_ERROR_ARGUMENT;
     return false;
   }
-  ts21_heater_inhibit();
   ts21_mmio_write(TS21_GPIOA + 0x14, 1);
   gpio_mode(TS21_GPIOA, 0, 2);
   ts21_mmio_write(TS21_GPIOB + 0x10, 1U << 15);
@@ -265,6 +434,11 @@ bool ts21_sample_sensors(struct TS21Sample *sample) {
   ts21_mmio_write(TS21_GPIOB + 0x14, 1U << 15);
   ok = ok && ts21_adc_read(4, &sample->auxiliary);
   ts21_heater_inhibit();
+#ifdef TS21_HEATER_TEST
+  if (ok) {
+    heater_record_sample(sample);
+  }
+#endif
   return ok;
 }
 
@@ -365,6 +539,11 @@ bool ts21_board_init(void) {
   uart_ready = false;
   adc_ready  = false;
   ts21_heater_inhibit();
+#ifdef TS21_HEATER_TEST
+  heater_session_started = false;
+  heater_saw_rise        = false;
+  heater_sample_error    = TS21_ERROR_SENSOR;
+#endif
   for (unsigned bank = 0; bank < 8; ++bank) {
     ts21_mmio_write(0xE000E180 + bank * 4, UINT32_MAX);
     ts21_mmio_write(0xE000E280 + bank * 4, UINT32_MAX);
@@ -385,6 +564,18 @@ bool ts21_board_init(void) {
   if (!adc_ready) {
     ts21_status.errors |= TS21_ERROR_ADC;
   }
+#ifdef TS21_HEATER_TEST
+  // Own the independent watchdog rather than relying on the bootloader's configuration.
+  ts21_mmio_write(TS21_IWDG, 0x5555);
+  ts21_mmio_write(TS21_IWDG + 4, 3);
+  ts21_mmio_write(TS21_IWDG + 8, 624); // Nominal 500 ms at 40 kHz LSI, prescaler 32.
+  if (!wait_bits(TS21_IWDG + 12, 3, 0)) {
+    ts21_status.errors |= TS21_ERROR_CLOCK;
+    return false;
+  }
+  ts21_mmio_write(TS21_IWDG, 0xCCCC);
+  ts21_watchdog_refresh();
+#endif
   ts21_heater_inhibit();
   return true;
 }

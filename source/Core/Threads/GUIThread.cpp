@@ -51,11 +51,14 @@ OperatingMode guiHandleDraw(void) {
   } else {
     // Buttons are none; check if we can sleep display
     uint32_t tipTemp = TipThermoModel::getTipInC();
+#if !defined(HEATER_DISABLED) && !defined(TS21_HEATER_TEST)
     if ((tipTemp < 50) && getSettingValue(SettingsOptions::Sensitivity) &&
         (((xTaskGetTickCount() - lastMovementTime) > MOVEMENT_INACTIVITY_TIME) && ((xTaskGetTickCount() - lastButtonTime) > BUTTON_INACTIVITY_TIME))) {
       OLED::setDisplayState(OLED::DisplayState::OFF);
       setStatusLED(LED_OFF);
-    } else {
+    } else
+#endif
+    {
       OLED::setDisplayState(OLED::DisplayState::ON);
     }
     if (currentOperatingMode != OperatingMode::Soldering && currentOperatingMode != OperatingMode::SolderingProfile) {
@@ -142,8 +145,12 @@ OperatingMode guiHandleDraw(void) {
     }
     break;
   case OperatingMode::ThermalRunaway:
+#ifdef TS21_HEATER_TEST
+    newMode = warnUser(translatedString(Tr->WarningThermalRunaway), buttons) ? OperatingMode::HomeScreen : OperatingMode::ThermalRunaway;
+#else
     /*TODO*/
     newMode = OperatingMode::HomeScreen;
+#endif
     break;
   };
   return newMode;

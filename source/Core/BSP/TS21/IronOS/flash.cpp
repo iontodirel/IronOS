@@ -37,9 +37,9 @@ void flash_save_buffer(const uint8_t *buffer, const uint16_t length) {
   alignas(4) uint16_t page[128];
   memcpy(page, (const void *)SETTINGS_START_PAGE, sizeof(page));
   memcpy(page, buffer, length);
-  ts21_heater_inhibit();
   uint32_t state;
   __asm volatile("csrrci %0, mstatus, 8" : "=r"(state)::"memory");
+  ts21_heater_inhibit();
   flashRegister(4)    = 0x45670123;
   flashRegister(4)    = 0xCDEF89AB;
   flashRegister(0x24) = 0x45670123;

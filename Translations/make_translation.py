@@ -1113,7 +1113,8 @@ def write_language(
         f.write("void prepareTranslations() {\n")
         if compress_font:
             f.write(
-                "  blz_depack_srcsize(font_12x16_brieflz, font_out_buffer, sizeof(font_12x16_brieflz));\n"
+                "  blz_depack_srcsize(font_12x16_brieflz, font12_out_buffer, sizeof(font_12x16_brieflz));\n"
+                "  blz_depack_srcsize(font_06x08_brieflz, font06_out_buffer, sizeof(font_06x08_brieflz));\n"
             )
         if strings_bin:
             f.write(

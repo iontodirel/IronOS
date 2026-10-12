@@ -56,8 +56,8 @@ _PD Mode_ option in _Power settings_ submenu to _Safe_ or _Default_.
 
 ## Experimental TS21 development
 
-The [experimental TS21 port](source/Core/BSP/TS21/README.md) builds the normal IronOS interface with the heater **unconditionally disabled**.
-The full 128x32 UI has been observed on a TS21; the updated button mapping, responsiveness and sensor accuracy still need hardware validation. It is excluded from supported models and release builds.
+The [experimental TS21 port](source/Core/BSP/TS21/README.md) builds the normal IronOS interface with the heater **disabled by default**. A separate, explicitly selected first-heating build limits the estimated power to 2 W, the target to 80 C, and the heating session to 10 seconds.
+The full 128x32 UI and low-temperature response have been observed on a TS21; powered operation, sensor accuracy and electrical fault shutdown still need hardware validation. This is not supported soldering firmware and is excluded from release builds.
 
 ## Getting Started
 

@@ -12,7 +12,13 @@ ALL_MODELS=$(ALL_MINIWARE_MODELS) $(ALL_PINECIL_MODELS) $(ALL_MHP30_MODELS) $(AL
 ifeq ($(model),TS21)
 .DELETE_ON_ERROR:
 ifneq ($(TS21_EXPERIMENTAL),1)
-$(error TS21 is a heater-disabled development port; set TS21_EXPERIMENTAL=1)
+$(error TS21 is an experimental development port; set TS21_EXPERIMENTAL=1)
+endif
+TS21_HEATER_TEST?=0
+ifneq ($(TS21_HEATER_TEST),0)
+ifneq ($(TS21_HEATER_TEST),1)
+$(error TS21_HEATER_TEST must be 0 or 1)
+endif
 endif
 ALL_MODELS+=TS21
 endif
@@ -27,6 +33,10 @@ HEXFILE_DIR=Hexfile
 # Temporary objects folder
 OUTPUT_DIR_BASE=Objects
 OUTPUT_DIR=Objects/$(model)
+ifeq ($(model):$(TS21_HEATER_TEST),TS21:1)
+OUTPUT_DIR=Objects/TS21-heater-test
+HEXFILE_DIR=Hexfile/TS21-heater-test
+endif
 # DENSE_UI=1 builds the data dense 128x32 layout (OLED_128x32_DENSE_UI) into its own object set.
 # Used by build.sh for the S60 / T55, where the layout fits every language except the CJK ones
 # (see the note in Core/BSP/Sequre/configuration.h); the S99 / S60P enable it in configuration.h.
@@ -324,6 +334,9 @@ DEVICE_DFU_ADDRESS=0x08007000
 CPUFLAGS=-march=rv32imac -mabi=ilp32 -mcmodel=medany -fsigned-char -nostartfiles
 DEV_LDFLAGS=-nostartfiles
 DEV_GLOBAL_DEFS=-DTS21_IRONOS -DportasmHANDLE_INTERRUPT=unused
+ifeq ($(TS21_HEATER_TEST),1)
+DEV_GLOBAL_DEFS+=-DTS21_HEATER_TEST
+endif
 endif
 
 DEVICE_BSP_INCLUDE_DIRS:= ${shell find ${DEVICE_BSP_DIR} -type d -print}
@@ -664,8 +677,8 @@ Core/Gen/Translation_brieflz_font.%.cpp: $(OUTPUT_DIR)/Core/Gen/translation.file
 	@test -d $(@D) || mkdir -p $(@D)
 	@echo Generating BriefLZ compressed translation font for $*
 	@$(HOST_PYTHON) ../Translations/make_translation.py        \
-		--macros $(PWD)/Core/Gen/macros.txt                \
-		-o $(PWD)/Core/Gen/Translation_brieflz_font.$*.cpp \
+		--macros "$(CURDIR)/Core/Gen/macros.txt"                \
+		-o "$(CURDIR)/Core/Gen/Translation_brieflz_font.$*.cpp" \
 		--input-pickled $(OUTPUT_DIR)/Core/Gen/translation.files/$*.pickle \
 		--compress-font \
 		$*
@@ -782,5 +795,6 @@ check-style:
 # Pull in dependency info for *existing* .o files
 -include $(OUT_OBJS:.o=.d)
 -include $(OUT_OBJS_CPP:.o=.d)
--include $(OUTPUT_DIR)/Core/Gen/*.d
--include $(OUTPUT_DIR)/Core/Gen/translation.files/*.d
+$(OUTPUT_DIR)/Core/Gen/%.d: ;
+-include $(wildcard $(OUTPUT_DIR)/Core/Gen/*.d)
+-include $(wildcard $(OUTPUT_DIR)/Core/Gen/translation.files/*.d)

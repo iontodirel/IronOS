@@ -73,6 +73,9 @@ $(OUT)/host-tests: tests/host_tests.c hardware.c protocol.c sensors.c ts21.h Mak
 $(OUT)/ironos-hardware-tests: tests/host_tests.c hardware.c protocol.c sensors.c ts21.h Makefile | $(OUT)
 	$(HOST_CC) $(WARNINGS) -std=c11 -DTS21_HOST_TEST -DTS21_IRONOS -I. tests/host_tests.c hardware.c protocol.c sensors.c -o $@
 
+$(OUT)/heater-tests: tests/host_tests.c hardware.c protocol.c sensors.c ts21.h Makefile | $(OUT)
+	$(HOST_CC) $(WARNINGS) -std=c11 -DTS21_HOST_TEST -DTS21_IRONOS -DTS21_HEATER_TEST -I. tests/host_tests.c hardware.c protocol.c sensors.c -o $@
+
 HOST_INCLUDES := -I. -IIronOS -IIronOS/Port -I$(ROOT)/source/Core/BSP \
                  -I$(ROOT)/source/Core/Inc -I$(ROOT)/source/Core/Drivers \
                  -I$(ROOT)/source/Middlewares/Third_Party/FreeRTOS/Source/include \
@@ -87,8 +90,14 @@ $(OUT)/ironos-tests: $(HOST_IRONOS_SOURCES) Makefile IronOS/configuration.h | $(
 	$(HOST_CXX) -std=c++17 -Wall -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-D__riscv_xlen=32 -DMODEL_TS21 -DTS21_IRONOS $(HOST_INCLUDES) $(HOST_IRONOS_SOURCES) -o $@
 
-test: $(OUT)/host-tests $(OUT)/ironos-hardware-tests $(OUT)/ironos-tests
+$(OUT)/heater-power-tests: $(HOST_IRONOS_SOURCES) Makefile IronOS/configuration.h | $(OUT)
+	$(HOST_CXX) -std=c++17 -Wall -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-D__riscv_xlen=32 -DMODEL_TS21 -DTS21_IRONOS -DTS21_HEATER_TEST $(HOST_INCLUDES) $(HOST_IRONOS_SOURCES) -o $@
+
+test: $(OUT)/host-tests $(OUT)/ironos-hardware-tests $(OUT)/ironos-tests $(OUT)/heater-tests $(OUT)/heater-power-tests
 	$(OUT)/host-tests
 	$(OUT)/ironos-hardware-tests
 	$(OUT)/ironos-tests
+	$(OUT)/heater-tests
+	$(OUT)/heater-power-tests
 	$(PYTHON) -m unittest discover -s tests -p '*_test.py'

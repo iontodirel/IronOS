@@ -12,6 +12,7 @@ extern "C" {
 #define TS21_RCC       UINT32_C(0x40021000)
 #define TS21_GPIOA     UINT32_C(0x40010800)
 #define TS21_GPIOB     UINT32_C(0x40010C00)
+#define TS21_TIM1      UINT32_C(0x40012C00)
 #define TS21_TIM3      UINT32_C(0x40000400)
 #define TS21_ADC1      UINT32_C(0x40012400)
 #define TS21_USART2    UINT32_C(0x40004400)
@@ -31,16 +32,41 @@ extern "C" {
 #define TS21_SCL       (UINT32_C(1) << 10)
 #define TS21_SDA       (UINT32_C(1) << 11)
 
+#ifdef TS21_HEATER_TEST
+#ifndef TS21_IRONOS
+#error "The standalone TS21 diagnostic must never enable heating"
+#endif
+#define TS21_HEATER_POWER_X10     20U
+#define TS21_HEATER_TARGET_C      80
+#define TS21_HEATER_CUTOFF_C      90
+#define TS21_HEATER_SESSION_US    UINT32_C(10000000)
+#define TS21_HEATER_FRESH_US      UINT32_C(20000)
+#define TS21_HEATER_COMMAND_US    UINT32_C(150000)
+#define TS21_HEATER_WINDOW_MS     120U
+#define TS21_HEATER_PERIOD        (TS21_CLOCK_HZ / 100000U)
+#define TS21_HEATER_MIN_R_X10     10U
+#define TS21_HEATER_MAX_R_X10     100U
+#define TS21_HEATER_MIN_INPUT_X10 45U
+#define TS21_HEATER_MAX_INPUT_X10 210U
+#endif
+
 enum TS21Error {
-  TS21_ERROR_CLOCK    = 1U << 0,
-  TS21_ERROR_ADC      = 1U << 1,
-  TS21_ERROR_I2C_BUS  = 1U << 2,
-  TS21_ERROR_I2C_NACK = 1U << 3,
-  TS21_ERROR_UART     = 1U << 4,
-  TS21_ERROR_ARGUMENT = 1U << 5,
-  TS21_ERROR_TRAP     = 1U << 6,
-  TS21_ERROR_FLASH    = 1U << 7,
-  TS21_ERROR_SENSOR   = 1U << 8,
+  TS21_ERROR_CLOCK          = 1U << 0,
+  TS21_ERROR_ADC            = 1U << 1,
+  TS21_ERROR_I2C_BUS        = 1U << 2,
+  TS21_ERROR_I2C_NACK       = 1U << 3,
+  TS21_ERROR_UART           = 1U << 4,
+  TS21_ERROR_ARGUMENT       = 1U << 5,
+  TS21_ERROR_TRAP           = 1U << 6,
+  TS21_ERROR_FLASH          = 1U << 7,
+  TS21_ERROR_SENSOR         = 1U << 8,
+  TS21_ERROR_HEATER_SHORT   = 1U << 9,
+  TS21_ERROR_HEATER_STALE   = 1U << 10,
+  TS21_ERROR_HEATER_TIMEOUT = 1U << 11,
+  TS21_ERROR_HEATER_TEMP    = 1U << 12,
+  TS21_ERROR_HEATER_NO_RISE = 1U << 13,
+  TS21_ERROR_HEATER_SUPPLY  = 1U << 14,
+  TS21_ERROR_HEATER_OPEN    = 1U << 15,
 };
 
 struct TS21PDParser {
@@ -91,11 +117,19 @@ uint8_t  ts21_buttons(void);
 bool     ts21_adc_read(uint8_t channel, uint16_t *value);
 bool     ts21_sample_sensors(struct TS21Sample *sample);
 bool     ts21_tip_delta_c(uint16_t raw, int16_t *value);
+uint8_t  ts21_tip_resistance_x10(const struct TS21Sample *sample);
 bool     ts21_handle_c_x10(uint16_t raw, int16_t *value);
 uint16_t ts21_input_voltage_x10(uint16_t raw);
 void     ts21_uart_poll(void);
 bool     ts21_oled_write(uint8_t control, const uint8_t *data, size_t size);
 void     ts21_fault(uint32_t error) __attribute__((noreturn));
+
+#ifdef TS21_HEATER_TEST
+bool     ts21_heater_permitted(void);
+void     ts21_heater_failed(void);
+void     ts21_heater_check(void);
+uint32_t getTipX10Watts(void);
+#endif
 
 #ifdef TS21_HOST_TEST
 uint32_t ts21_mmio_read(uint32_t address);

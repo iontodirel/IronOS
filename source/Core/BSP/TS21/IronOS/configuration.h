@@ -5,7 +5,16 @@
 #error "This configuration is only for the experimental TS21 target"
 #endif
 
+#ifdef TS21_HEATER_TEST
+#include "ts21.h"
+#define TIP_CONTROL_PID
+#define TIP_PID_KP 1
+#define TIP_PID_KI 0
+#define TIP_PID_KD 0
+#define BSP_HAS_POWER_READBACK
+#else
 #define HEATER_DISABLED 1
+#endif
 #define TEMP_DIRECT_ADC 1
 #define CUSTOM_MAX_TEMP_C
 #define NO_ACCEL 1
@@ -17,9 +26,14 @@
 #define OLED_MEMORY_MODE             2
 #define ADC_MAX_READING              4096
 #define PID_TIM_HZ                   8
+#ifdef TS21_HEATER_TEST
+#define SOLDERING_TEMP TS21_HEATER_TARGET_C
+#define BOOST_TEMP     0
+#else
 #define SOLDERING_TEMP               320
-#define SLEEP_TEMP                   150
 #define BOOST_TEMP                   420
+#endif
+#define SLEEP_TEMP                   150
 #define AUTO_START_MODE              0
 #define LOCKING_MODE                 0
 #define ORIENTATION_MODE             0
@@ -56,17 +70,27 @@
 #define CALIBRATION_OFFSET           0
 #define MIN_CALIBRATION_OFFSET       0
 #define PID_POWER_LIMIT              0
+#ifdef TS21_HEATER_TEST
+#define POWER_LIMIT              2
+#define MAX_POWER_LIMIT          2
+#define HARDWARE_MAX_WATTAGE_X10 TS21_HEATER_POWER_X10
+#define MAX_TEMP_C               TS21_HEATER_TARGET_C
+#define MAX_TEMP_F               176
+#define MIN_BOOST_TEMP_C         50
+#define MIN_BOOST_TEMP_F         122
+#else
 #define POWER_LIMIT                  0
 #define MAX_POWER_LIMIT              0
-#define POWER_LIMIT_STEPS            1
 #define HARDWARE_MAX_WATTAGE_X10     0
-#define ENFORCE_HARDWARE_MAX_WATTAGE 1
 #define MAX_TEMP_C                   450
 #define MAX_TEMP_F                   850
-#define MIN_TEMP_C                   10
-#define MIN_TEMP_F                   50
 #define MIN_BOOST_TEMP_C             250
 #define MIN_BOOST_TEMP_F             480
+#endif
+#define POWER_LIMIT_STEPS            1
+#define ENFORCE_HARDWARE_MAX_WATTAGE 1
+#define MIN_TEMP_C                   10
+#define MIN_TEMP_F                   50
 #define USB_PD_TIMEOUT               0
 #define USB_PD_VMAX                  5
 #define USB_PD_EPR_WATTAGE           0

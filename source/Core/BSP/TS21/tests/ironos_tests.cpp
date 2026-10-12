@@ -14,12 +14,23 @@ uint16_t        totalPWM = 255;
 static unsigned calls;
 static uint8_t    buttons;
 static TickType_t ticks;
+static uint16_t   inputVoltage = 50;
+#ifdef TS21_HEATER_TEST
+static uint8_t actualPWM;
+#endif
 
 void setTipPWM(uint8_t pulse, bool) {
+#ifdef TS21_HEATER_TEST
+  actualPWM = std::min<uint8_t>(pulse, 7);
+#else
   assert(pulse == 0);
+#endif
   ++calls;
 }
-uint16_t getInputVoltageX10(uint16_t, uint8_t) { return 50; }
+#ifdef TS21_HEATER_TEST
+uint32_t getTipX10Watts() { return actualPWM * availableW10(0) / powerPWM; }
+#endif
+uint16_t getInputVoltageX10(uint16_t, uint8_t) { return inputVoltage; }
 uint8_t  getTipResistanceX10() { return 20; }
 uint16_t getSettingValue(SettingsOptions) { return VOLTAGE_DIV; }
 
@@ -137,12 +148,29 @@ extern uint8_t disconnectedTipF[sizeof(disconnectedTip)];
 int main() {
   for (int32_t watts = -100; watts <= 2000; ++watts) {
     setTipX10Watts(watts);
+#ifndef TS21_HEATER_TEST
     assert(x10WattHistory.average() == 0);
+#endif
   }
   setTipX10Watts(INT32_MAX);
   setTipX10Watts(INT32_MIN);
   assert(calls == 2103);
+#ifndef TS21_HEATER_TEST
   assert(x10WattHistory.average() == 0);
+#else
+  x10WattHistory.sum = 3;
+  for (unsigned i = 0; i < 100; ++i) {
+    setTipX10Watts(100);
+  }
+  assert(actualPWM == 7 && x10WattHistory.average() == 3);
+  assert(X10WattsToPWM(INT32_MAX, 0) == 255);
+  assert(X10WattsToPWM(INT32_MIN, 0) == 0);
+  inputVoltage = 0;
+  assert(X10WattsToPWM(1, 0) == 0);
+  setTipX10Watts(100);
+  assert(actualPWM == 0);
+  inputVoltage = 50;
+#endif
 
   ui_pre_render_assets();
   for (unsigned row = 0; row < 4; ++row) {

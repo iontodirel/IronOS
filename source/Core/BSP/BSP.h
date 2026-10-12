@@ -38,6 +38,9 @@ void BSPInit(void);
 void resetWatchdog();
 // Accepts a output level of 0.. to use to control the tip output PWM
 void setTipPWM(const uint8_t pulse, const bool shouldUseFastModePWM);
+#ifdef BSP_HAS_POWER_READBACK
+uint32_t getTipX10Watts(void);
+#endif
 #ifdef TIP_CURRENT_LIMIT_CHOP
 // Fraction (x256) of the output on-time that the fast chop leaves the tip powered, so that the average
 // tip current stays within the supply limit. 256 == no chopping. Recomputes & latches the value used by the ISR.
