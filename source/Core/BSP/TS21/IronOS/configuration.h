@@ -13,6 +13,7 @@
 #define OLED_128x32
 #define OLED_I2C_PER_BYTE_TRANSFERS
 #define OLED_128x32_COM_SEQUENTIAL
+#define OLED_DISPLAY_OFFSET_QUIRK    1
 #define OLED_MEMORY_MODE             2
 #define ADC_MAX_READING              4096
 #define PID_TIM_HZ                   8

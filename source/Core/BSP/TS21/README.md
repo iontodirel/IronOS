@@ -10,10 +10,11 @@ added to the screen.
 
 This remains a development port, not supported soldering firmware. The earlier
 diagnostic was accepted by the TS21 bootloader (`.rdy`) and booted on one device.
-Its `A1/C8` display orientation was upside down; the IronOS target instead uses
-`A0/C0`, offset zero and the panel's sequential COM layout. Normal IronOS
-execution, the corrected orientation, physical button mapping, sensor accuracy
-and electrical heater inhibition still require confirmation on the device.
+Its `A1/C8` display orientation was upside down. The IronOS target uses the
+stock panel mapping: `A0/C0/D3 30` normally, `A1/C8/D3 10` when rotated, and
+sequential COM wiring. The application now reaches the normal UI on the device.
+The final display mapping, physical button mapping, sensor accuracy and
+electrical heater inhibition still require confirmation.
 
 The first full IronOS image was subsequently accepted as `I21OS.rdy`: 99,985
 Intel HEX bytes containing 35,524 application bytes, within the 35,840-byte
@@ -31,11 +32,21 @@ Startup now configures the WCH instruction pipeline and enters `main` through
 Instruction-level simulation reproduces the missing-GUI failure for the old
 entry with an active interrupt and reaches the normal GUI with the corrected
 entry, both with and without that inherited state. This is a simulated handoff
-regression, not a measured hardware trace; the corrected image still requires
-physical confirmation.
+regression, not a measured hardware trace.
 The corrected image was accepted as `I21FIX.rdy` (35,548 application bytes);
 its HEX SHA-256 is
 `53a578226cc11163faf98cb346891285e43aba96b758d985fbe07d70d9bf61d7`.
+The user subsequently confirmed that this image reaches the UI, but half of
+the screen was clipped. The zero display offset was incorrect for the panel.
+TS21 now enables the existing `OLED_DISPLAY_OFFSET_QUIRK` path: the stock
+orientation routines at `0x080085DA` and `0x08008DC4` specify offsets `0x30`
+and `0x10` alongside their matching COM/segment directions. The interface
+remains 128x32; no rows, columns or controls are removed to hide the clipping.
+
+The display-mapping image was accepted as `I21LCD.rdy` (100,120 Intel HEX
+bytes; 35,572 application bytes). Its HEX SHA-256 is
+`9eb9947c76f8868125e9b669152975f52ef2fbb74b6de22346f40a9b2b86f31e`.
+Its physical screen result has not yet been confirmed.
 
 The optional startup regression uses the actual linked ELF with simulated
 peripherals; it does not replace on-device observation. In a development Python
@@ -69,6 +80,8 @@ make test-ts21
 Native tests exercise all 512 BSP PWM level/mode requests, zero requested and
 reported IronOS heater power, inherited interrupt reset, sensor conversion and
 failure paths, and all 56 columns of each four-row mirrored home-screen asset.
+They also execute the actual OLED driver to check its startup and both rotation
+command sequences and every byte of all four 128-column framebuffer pages.
 The image-tool tests check the protected memory ranges and exact HEX contents.
 
 The equivalent source target is

@@ -1,8 +1,12 @@
 #include "Font.h"
+#include "OLED.hpp"
 #include "Settings.h"
 #include "power.hpp"
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdio>
+#include <vector>
 
 const uint16_t  powerPWM = 255;
 uint16_t        totalPWM = 255;
@@ -15,6 +19,69 @@ void setTipPWM(uint8_t pulse, bool) {
 uint16_t getInputVoltageX10(uint16_t, uint8_t) { return 50; }
 uint8_t  getTipResistanceX10() { return 20; }
 uint16_t getSettingValue(SettingsOptions) { return VOLTAGE_DIV; }
+
+void vTaskDelay(TickType_t) {}
+
+static std::vector<uint8_t>                           oledCommands;
+static std::array<std::array<uint8_t, OLED_WIDTH>, 4> oledPages;
+static std::array<unsigned, 4>                        oledPageWrites;
+
+bool FRToSI2C::I2C_RegisterWrite(uint8_t address, uint8_t control, uint8_t value) {
+  assert(address == DEVICEADDR_OLED && control == 0);
+  oledCommands.push_back(value);
+  return true;
+}
+
+bool FRToSI2C::Mem_Write(uint16_t address, uint16_t control, uint8_t *data, uint16_t size) {
+  assert(address == DEVICEADDR_OLED && control == 0x40 && size == OLED_WIDTH);
+  assert(oledCommands.size() >= 3);
+  const size_t start = oledCommands.size() - 3;
+  assert(oledCommands[start] >= 0xB0 && oledCommands[start] <= 0xB3);
+  assert(oledCommands[start + 1] == 0x10 && oledCommands[start + 2] == 0);
+  const unsigned page = oledCommands[start] - 0xB0;
+  std::copy_n(data, size, oledPages[page].begin());
+  ++oledPageWrites[page];
+  return true;
+}
+
+static void testOLEDMapping() {
+  static_assert(OLED_WIDTH == 128 && OLED_HEIGHT == 32, "Keep the complete TS21 interface");
+  OLED::initialize();
+  const std::array<uint8_t, 5> initialMapping = {0xC0, 0xD3, 0x30, 0x40, 0xA0};
+  assert(std::search(oledCommands.begin(), oledCommands.end(), initialMapping.begin(), initialMapping.end()) != oledCommands.end());
+  const std::array<uint8_t, 2> sequentialCOM = {0xDA, 0x02};
+  assert(std::search(oledCommands.begin(), oledCommands.end(), sequentialCOM.begin(), sequentialCOM.end()) != oledCommands.end());
+  const std::array<uint8_t, 2> pageAddressing = {0x20, 0x02};
+  assert(std::search(oledCommands.begin(), oledCommands.end(), pageAddressing.begin(), pageAddressing.end()) != oledCommands.end());
+
+  std::array<uint8_t, OLED_WIDTH * 4> frame;
+  for (unsigned row = 0; row < 4; ++row) {
+    for (unsigned x = 0; x < OLED_WIDTH; ++x) {
+      frame[row * OLED_WIDTH + x] = static_cast<uint8_t>((row + 1) * 31 + x);
+    }
+  }
+  OLED::drawArea(0, 0, OLED_WIDTH, OLED_HEIGHT, frame.data());
+  for (unsigned pass = 0; pass < 3; ++pass) {
+    oledCommands.clear();
+    oledPageWrites.fill(0);
+    if (pass == 0) {
+      OLED::setRotation(false);
+      assert(oledCommands.empty());
+      OLED::refresh();
+    } else {
+      const bool left = pass == 1;
+      OLED::setRotation(left);
+      const std::array<uint8_t, 4> mapping = {static_cast<uint8_t>(left ? 0xC8 : 0xC0), 0xD3, static_cast<uint8_t>(left ? 0x10 : 0x30), static_cast<uint8_t>(left ? 0xA1 : 0xA0)};
+      assert(oledCommands.size() >= mapping.size());
+      assert(std::equal(mapping.begin(), mapping.end(), oledCommands.begin()));
+      assert(OLED::getRotation() == left);
+    }
+    for (unsigned row = 0; row < 4; ++row) {
+      assert(oledPageWrites[row] == 1);
+      assert(std::equal(oledPages[row].begin(), oledPages[row].end(), frame.begin() + row * OLED_WIDTH));
+    }
+  }
+}
 
 void           ui_pre_render_assets(void);
 extern uint8_t buttonAF[sizeof(buttonA)];
@@ -40,5 +107,6 @@ int main() {
       assert(disconnectedTipF[destination] == disconnectedTip[source]);
     }
   }
-  puts("TS21 IronOS tests passed: zero requested/reported heater power and complete 128x32 asset rotation");
+  testOLEDMapping();
+  puts("TS21 IronOS tests passed: heater lockout, asset rotation, stock OLED offsets, and all 128x32 pixels in both orientations");
 }

@@ -75,10 +75,12 @@ HOST_INCLUDES := -I. -IIronOS -IIronOS/Port -I$(ROOT)/source/Core/BSP \
                  -I$(ROOT)/source/Middlewares/Third_Party/FreeRTOS/Source/include \
                  $(addprefix -I,$(shell find $(ROOT)/source/Core/Threads -type d))
 HOST_IRONOS_SOURCES := tests/ironos_tests.cpp $(ROOT)/source/Core/Src/power.cpp \
+                       $(ROOT)/source/Core/Drivers/OLED.cpp \
                        $(ROOT)/source/Core/Threads/UI/drawing/mono_128x32/pre_render_assets.cpp
 
 $(OUT)/ironos-tests: $(HOST_IRONOS_SOURCES) Makefile IronOS/configuration.h | $(OUT)
-	$(HOST_CXX) -std=c++17 -Wall -Werror -D__riscv_xlen=32 -DMODEL_TS21 $(HOST_INCLUDES) $(HOST_IRONOS_SOURCES) -o $@
+	$(HOST_CXX) -std=c++17 -Wall -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-D__riscv_xlen=32 -DMODEL_TS21 $(HOST_INCLUDES) $(HOST_IRONOS_SOURCES) -o $@
 
 test: $(OUT)/host-tests $(OUT)/ironos-tests
 	$(OUT)/host-tests
