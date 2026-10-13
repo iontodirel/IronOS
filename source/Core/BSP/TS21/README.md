@@ -1,6 +1,6 @@
 # Experimental TS21 IronOS port
 
-## Bounded 5 W / three-second build
+## C210 temperature-controlled test build
 
 `ts21-ironos` still hard-disables heating. The separate opt-in below builds the
 normal IronOS UI with a real, restricted heater path:
@@ -14,7 +14,7 @@ The image is
 `source/Hexfile/TS21-heater-test/TS21_font_compressed_EN.hex`, not
 `source/Hexfile/TS21_EN.hex`. Both root build targets force regeneration to
 avoid reusing another model/variant's generated settings or translations.
-The first-heating build uses the existing lossless font-compression format to
+The experimental heater build uses the existing lossless font-compression format to
 stay inside the unchanged 35 KiB application region. Both font buffers are
 decompressed before use; their pixels and the full 128x32 UI are unchanged.
 Bootloader and settings boundaries are not expanded.
@@ -47,7 +47,10 @@ the soldering screen open.
 
 On each boot it starts unarmed at the normal home screen. Saved autostart,
 boost and power-bank keepalive are overridden in RAM, and the setpoint is
-limited to 80 C (176 F). The power-limit setting is initialized to 5 W in RAM,
+initialized to **90 C (194 F)** for margin below the **100 C (212 F) ceiling**.
+Temperature selection is limited to that ceiling in either unit, and the
+driver latches off at an indicated 100 C independently of controller demand.
+The power-limit setting is initialized to 5 W in RAM,
 including when the previous build saved a 2 W limit; it can still be reduced
 in settings but cannot raise the driver's ceiling.
 A bottom-button press/release from home is required
@@ -56,11 +59,20 @@ in the ordinary soldering mode, with a positive target and fresh GUI activity.
 The screen stays awake during this bench test.
 
 The estimated output is capped at **5 W**, independently of the user's voltage
-calibration or requested PWM, and the driver refuses further output at an
-indicated 80 C even if a keepalive request bypasses the controller.
-The controller is the existing PID template with
-proportional gain 0.1 W/C and zero integral/derivative gains; no invented thermal
-mass or inertia is used. Requests consume a valid sensor sample no older than
+calibration or requested PWM. The controller is the same shared IronOS
+decaying-integrator path used by SEQURE S60/S60P, with their C210 parameters:
+thermal mass 10 and inertia 128. S99 is a C245 model with different tuning.
+The TS21 keeps its own stock-derived ADC/NTC/resistance conversions, carrier
+frequency and shutdown gate; SEQURE analog calibration and timer registers
+are not portable to this board. Starting/resuming the shared controller after
+idle, or calling it twice in one tick, uses the nominal rate rather than
+dividing by zero.
+
+[JBC specifies 40 W peak for its genuine T210/C210 handle](https://www.jbctools.com/product_datasheet.php?id=48).
+That is not a verified power rating for every compatible cartridge or for this
+experimental TS21 port; this build remains limited to an estimated 5 W.
+
+Requests consume a valid sensor sample no older than
 20 ms. Each accepted request produces at most a 120 ms gate pulse, with a
 150 ms software command deadline. Both tasks and interrupt execution may stop
 without extending that hardware pulse. A missing GUI update for 500 ms also
@@ -70,29 +82,32 @@ This image accepts measured resistance from 1.0 through 10.0 ohms and input
 voltage from 4.5 through 21.0 V; these are conservative test acceptance bounds,
 not claimed cartridge specifications. Short/open resistance, invalid sensors,
 invalid supply, handle temperature outside 0..60 C and tip temperature at or
-above 90 C inhibit output. Faults latch until reboot. Regardless of
-temperature response, the session ends **3 seconds** after its first nonzero
-request; exiting/reentering soldering does not renew that allowance.
-This is nominally up to 15 J of estimated energy, not a measured energy or
-temperature guarantee. The duration is a software session deadline; the
-independent hardware gate still bounds an individual pulse if execution stalls.
-The retained 5-second/3 C no-rise check cannot normally run before this
-shorter session ends, so this pulse is not a test of that protection or proof
-of valid temperature feedback. Use an independent thermometer. The previous
-2 W / 10-second artifacts remain a separate, unchanged earlier test stage.
+above **100 C** inhibit output. Faults latch until reboot.
+There is **no fixed three- or five-second heating-session cutoff**. Normal
+temperature control continues until the user exits or a protection acts.
+The board still requires at least 3 C progress within a 20-second window when
+heating is armed and the tip is at least 3 C below the target, matching the
+S60/S60P rise-check interval and threshold. Progress restarts this watchdog;
+being near the target or idle resets it. It remains active after warm-up, so a
+later stuck reading is not excused by an earlier successful rise.
+
+**The 100 C cutoff is an indicated-temperature limit, not an absolute physical
+temperature guarantee.** Calibration error, thermal overshoot, or a failed
+power device can defeat that interpretation. Use an independent thermometer;
+an unconditional physical limit needs independent hardware protection.
+Previous timed-test artifacts remain separate and unchanged.
 The normal warning screen now says **Heating stopped** and shows an eight-digit
 hexadecimal stop code. It stays visible until a button acknowledges it, even
 if the last button press was more than five seconds ago. Acknowledging it does
 not clear the fault: the home screen reports the current tip connection, and
 another bottom-button start only reopens the stop warning without arming or
 heating. Passive UART diagnostic bits are excluded from this displayed code.
-The test clock stops with the fault, so cooling afterward does not add a
-misleading session timeout or no-rise fault.
+The rise watchdog stops with the fault, so cooling afterward does not add
+another no-rise fault.
 
 | Stop code | Meaning |
 | --- | --- |
-| `00002000` | Retained 5-second no-rise guard; not normally reached in this 3-second test |
-| `00000800` | The 3-second test allowance expired |
+| `00002000` | Less than 3 C progress within 20 seconds while heating is needed |
 | `00000400` | Missing, consumed or stale sensor/control update |
 | `00000200` | Resistance below the short-circuit threshold |
 | `00008000` | Open/clipped or out-of-range high resistance reading |
@@ -104,6 +119,7 @@ misleading session timeout or no-rise fault.
 Codes are a bitmask; multiple flags can be combined. Other bits are defined in
 `ts21.h`. A shared thermal-monitor stop is also latched by the board driver
 before it is displayed, so acknowledging it cannot permit a restart.
+`00000800` belongs to the previous timed test; this build does not generate it.
 Unplug after recording the code and readings.
 
 The earlier heater images used **Thermal Runaway** for every latched stop,
@@ -145,8 +161,9 @@ The MCU's independent watchdog is configured to a nominal 500 ms at 40 kHz
 LSI. The finite PA10 pulse, not idle-task watchdog refresh, bounds a stalled
 controller's output. The native tests cover all duty/mode combinations, raw
 power ceilings, sample consumption/age, GPIO/timer sequencing, invalid sensors,
-open/short resistance, supply/temperature bounds, command expiry, no-rise and
-session expiry across microsecond rollover. Power history uses the accepted
+open/short resistance, supply/temperature bounds, command expiry, recurring
+no-rise protection and continued near-target operation across microsecond
+rollover. The 99/100 C boundary is checked explicitly. Power history uses the accepted
 timer duty's raw-ADC-based power estimate, rather than a second lossy conversion
 through eight-bit PWM or reporting rejected requests as delivered power.
 
@@ -160,8 +177,8 @@ python3 source/Core/BSP/TS21/tools/emulate_boot.py \
   --check-heater short --instructions 160000000
 ```
 
-Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `pulse`,
-`session`, `uart` and `monitor`, and
+Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `continuous`,
+`no-rise`, `uart` and `monitor`, and
 exercise both interrupt-inherited and reset-context entry. It seeds saved
 autostart/boost/keepalive and the previous 2 W power setting, verifies unarmed startup, presses/releases the real
 bottom GPIO input, and requires bounded nonzero output before fault injection.
@@ -179,13 +196,15 @@ within the existing bounds, and then requires a short-circuit fault to stop
 output normally. Native checks cover all four UART receive-error flags and
 ensure every other error bit still inhibits output, including when combined
 with a UART error.
-The `session` run ages only the session timestamp for a quick cutoff check.
-The `pulse` run executes the full three seconds of modeled control with a
-constant temperature input, checks the timeout within one tick plus simulation
-overhead, and confirms acknowledgment cannot restart it. Use
-`--check-heater pulse --instructions 360000000` for its longer instruction budget.
-Native tests also check the exact 2,999,999/3,000,000 us boundary across counter
-rollover. These are not hardware timing, energy or thermal measurements.
+The `no-rise` run ages only the rise-watchdog timestamp for a fault check.
+The `continuous` run uses a scripted temperature rise, verifies controller
+modulation and continued operation beyond six seconds, then injects the exact
+100 C reading and checks shutdown and restart lockout. Use
+`--check-heater continuous --instructions 600000000` for its longer budget;
+`--fahrenheit` also exercises saved Fahrenheit settings. Native tests exercise
+continued operation for over a minute, renewed rise demand, counter rollover,
+and the actual shared controller's cold-start, idle and same-tick arithmetic.
+These are not hardware timing, energy or thermal measurements.
 Compressed font buffers are compared byte-for-byte against host decompression.
 This remains instruction/peripheral simulation, not electrical or thermal
 validation of a TS21.

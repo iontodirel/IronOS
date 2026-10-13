@@ -41,12 +41,14 @@ static uint32_t        uart_error;
 static uint16_t        adc_value;
 #ifdef TS21_HEATER_TEST
 static bool              heater_permitted;
+static int16_t           heater_target_c;
 static unsigned          heater_failures;
 static bool              use_adc_fixture;
 static struct TS21Sample adc_fixture;
 static uint64_t          gate_started_ticks;
 
 bool ts21_heater_permitted(void) { return heater_permitted; }
+bool ts21_heater_needs_rise(int16_t temperature) { return heater_target_c - temperature >= TS21_HEATER_RISE_C; }
 void ts21_heater_failed(void) {
   ++heater_failures;
   heater_permitted = false;
@@ -247,6 +249,7 @@ static void reset(void) {
   adc_value                 = 0xFABC;
 #ifdef TS21_HEATER_TEST
   heater_permitted = use_adc_fixture = false;
+  heater_target_c                    = TS21_HEATER_TARGET_C;
   heater_failures                    = 0;
   gate_started_ticks                 = 0;
 #endif
@@ -610,8 +613,8 @@ static void test_sensor_conversion(void) {
 
 #ifdef TS21_HEATER_TEST
 _Static_assert(TS21_HEATER_POWER_X10 == 50U, "The requested test ceiling is 5 W");
-_Static_assert(TS21_HEATER_SESSION_US == 3000000U, "The requested session limit is 3 seconds");
-_Static_assert(TS21_HEATER_TARGET_C == 80 && TS21_HEATER_CUTOFF_C == 90, "Keep the existing temperature limits");
+_Static_assert(TS21_HEATER_RISE_US == 20000000U, "Use the C210 twenty-second rise-fault interval");
+_Static_assert(TS21_HEATER_TARGET_C == 90 && TS21_HEATER_CUTOFF_C == 100, "Keep margin below the 100 C indicated ceiling");
 
 static void prepare_heater(void) {
   reset();
@@ -705,11 +708,16 @@ static void test_heater_faults(void) {
   assert_heater_off();
 
   prepare_heater();
-  adc_fixture.tip       = 858;
-  adc_fixture.tip_probe = 1212;
+  adc_fixture.tip       = 958; // 99 C with the fixture's 25 C handle.
+  adc_fixture.tip_probe = 1312;
   sample_heater();
   setTipPWM(255, false);
   assert(ts21_status.errors == 0);
+  assert(getTipX10Watts() == 50);
+  adc_fixture.tip       = 963; // Exactly 100 C.
+  adc_fixture.tip_probe = 1317;
+  sample_heater();
+  assert(ts21_status.errors == TS21_ERROR_HEATER_TEMP);
   assert_heater_off();
 
   prepare_heater();
@@ -803,12 +811,12 @@ static void test_heater_faults(void) {
   prepare_heater();
   sample_heater();
   setTipPWM(255, false);
-  ticks += 5000000ULL * TS21_TIMER_TICKS_PER_US;
+  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
   sample_heater();
   assert(ts21_status.errors & TS21_ERROR_HEATER_NO_RISE);
   assert_heater_off();
   const unsigned stopped_failures = heater_failures;
-  ticks += (uint64_t)TS21_HEATER_SESSION_US * TS21_TIMER_TICKS_PER_US;
+  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
   sample_heater();
   ts21_heater_check();
   assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
@@ -818,46 +826,46 @@ static void test_heater_faults(void) {
   setTipPWM(255, false);
   assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
   assert_heater_off();
-
-  prepare_heater();
-  ticks = ((uint64_t)UINT32_MAX - TS21_HEATER_SESSION_US / 2U) * TS21_TIMER_TICKS_PER_US;
-  sample_heater();
-  setTipPWM(255, false);
-  ticks += (uint64_t)TS21_HEATER_SESSION_US * TS21_TIMER_TICKS_PER_US;
-  ts21_heater_check();
-  assert(ts21_status.errors & TS21_ERROR_HEATER_TIMEOUT);
-  assert_heater_off();
-  const unsigned failures = heater_failures;
-  sample_heater();
-  ts21_heater_check();
-  assert(ts21_status.errors == TS21_ERROR_HEATER_TIMEOUT);
-  assert(heater_failures == failures);
 }
 
-static void test_three_second_session(void) {
+static void test_continuous_temperature_control(void) {
   for (unsigned wrap = 0; wrap < 2; ++wrap) {
     prepare_heater();
     if (wrap) {
       ticks = ((uint64_t)UINT32_MAX - 1000000U) * TS21_TIMER_TICKS_PER_US;
     }
+    adc_fixture.tip       = 909; // At the 90 C target, lack of further rise is not a fault.
+    adc_fixture.tip_probe = 1263;
+    for (unsigned i = 0; i < 480; ++i) {
+      ticks += 125000ULL * TS21_TIMER_TICKS_PER_US;
+      write_count = 0;
+      sample_heater();
+      setTipPWM(255, false);
+      ts21_heater_check();
+      assert(ts21_status.errors == 0);
+      assert(getTipX10Watts() == 50);
+    }
+
+    if (wrap) {
+      ticks = ((uint64_t)UINT32_MAX - 1000000U) * TS21_TIMER_TICKS_PER_US;
+    }
+    adc_fixture.tip       = 580;
+    adc_fixture.tip_probe = 934;
     sample_heater();
     setTipPWM(255, false);
-    assert(getTipX10Watts() == 50);
-    const uint64_t started = ticks;
-    ts21_heater_inhibit();
-    clock_running = false;
-    ticks         = started + 2999999ULL * TS21_TIMER_TICKS_PER_US;
-    ts21_heater_check();
+    ticks += 19000000ULL * TS21_TIMER_TICKS_PER_US;
+    adc_fixture.tip       = 610; // A genuine rise restarts the watchdog, not a fixed session cap.
+    adc_fixture.tip_probe = 964;
+    sample_heater();
+    setTipPWM(255, false);
     assert(ts21_status.errors == 0);
-    ticks = started + 3000000ULL * TS21_TIMER_TICKS_PER_US;
-    ts21_heater_check();
-    assert(ts21_status.errors == TS21_ERROR_HEATER_TIMEOUT);
-    assert_heater_off();
-    clock_running    = true;
-    heater_permitted = true;
+    ticks += 19000000ULL * TS21_TIMER_TICKS_PER_US;
     sample_heater();
     setTipPWM(255, false);
-    assert(ts21_status.errors == TS21_ERROR_HEATER_TIMEOUT);
+    assert(ts21_status.errors == 0);
+    ticks += 1000001ULL * TS21_TIMER_TICKS_PER_US;
+    sample_heater();
+    assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
     assert_heater_off();
   }
 }
@@ -915,9 +923,9 @@ int main(void) {
 #ifdef TS21_HEATER_TEST
   test_bounded_heater();
   test_heater_faults();
-  test_three_second_session();
+  test_continuous_temperature_control();
   test_passive_uart_heater();
-  puts("TS21 heater tests passed: measured resistance, power cap, finite hardware gate, freshness, faults and session limits");
+  puts("TS21 heater tests passed: power cap, finite gate, freshness, 100 C cutoff, continuous operation and rise watchdog");
 #endif
   puts("TS21 host tests passed: protocol, inhibit ordering, button mapping, clocks, ADC, UART, I2C and bounded failures");
   return 0;

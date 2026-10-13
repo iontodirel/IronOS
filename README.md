@@ -56,7 +56,7 @@ _PD Mode_ option in _Power settings_ submenu to _Safe_ or _Default_.
 
 ## Experimental TS21 development
 
-The [experimental TS21 port](source/Core/BSP/TS21/README.md) builds the normal IronOS interface with the heater **disabled by default**. A separate, explicitly selected short-pulse build limits the estimated power to 5 W, the target to 80 C, and the heating session to 3 seconds. This ends before the retained 5-second no-rise check and requires independent temperature measurement.
+The [experimental TS21 port](source/Core/BSP/TS21/README.md) builds the normal IronOS interface with the heater **disabled by default**. A separate, explicitly selected C210 test build uses the SEQURE S60/S60P shared controller tuning, an estimated 5 W ceiling, a 90 C default target and a latched cutoff at an indicated 100 C. There is no short timed-session limit; sensor, rise-watchdog and heater-gate protections remain. The indicated ceiling is not an unconditional physical temperature guarantee and requires independent measurement.
 The full 128x32 UI and low-temperature response have been observed on a TS21; powered operation, sensor accuracy and electrical fault shutdown still need hardware validation. This is not supported soldering firmware and is excluded from release builds.
 
 ## Getting Started

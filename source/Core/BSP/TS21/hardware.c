@@ -30,17 +30,16 @@ static void irq_restore(uint32_t state) {
 
 #ifdef TS21_HEATER_TEST
 static bool     heater_sample_ready;
-static bool     heater_session_started;
+static bool     heater_rise_tracking;
 static bool     heater_active;
-static bool     heater_saw_rise;
 static uint32_t heater_sample_us;
-static uint32_t heater_session_us;
+static uint32_t heater_rise_us;
 static uint32_t heater_command_us;
 static uint32_t heater_sample_error;
 static uint32_t heater_full_power_x10;
 static uint16_t heater_max_compare;
 static int16_t  heater_temperature;
-static int16_t  heater_start_temperature;
+static int16_t  heater_rise_temperature;
 static uint8_t  heater_power_x10;
 #endif
 
@@ -90,8 +89,7 @@ void ts21_watchdog_refresh(void) { ts21_mmio_write(TS21_IWDG, 0xAAAA); }
 #ifdef TS21_HEATER_TEST
 void ts21_heater_trip(uint32_t error) {
   ts21_heater_inhibit();
-  // A stopped test must not acquire a later timeout/no-rise fault while cooling.
-  heater_session_started = false;
+  heater_rise_tracking = false;
   ts21_status.errors |= error;
   ts21_heater_failed();
 }
@@ -102,9 +100,7 @@ void ts21_heater_check(void) {
   if (heater_active && ((ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS) || !ts21_heater_permitted())) {
     ts21_heater_inhibit();
   }
-  if (heater_session_started && !(ts21_status.errors & TS21_ERROR_HEATER_TIMEOUT) && (uint32_t)(now - heater_session_us) >= TS21_HEATER_SESSION_US) {
-    ts21_heater_trip(TS21_ERROR_HEATER_TIMEOUT);
-  } else if (heater_active && (uint32_t)(now - heater_command_us) >= TS21_HEATER_COMMAND_US) {
+  if (heater_active && (uint32_t)(now - heater_command_us) >= TS21_HEATER_COMMAND_US) {
     ts21_heater_trip(TS21_ERROR_HEATER_STALE);
   }
   irq_restore(state);
@@ -136,14 +132,17 @@ static void heater_record_sample(const struct TS21Sample *sample) {
     heater_max_compare           = (uint16_t)(TS21_HEATER_PERIOD * TS21_HEATER_POWER_X10 * resistance / (upper_voltage * upper_voltage));
     heater_sample_us             = ts21_micros();
     heater_sample_ready          = true;
-    if (heater_session_started) {
-      heater_saw_rise |= heater_temperature >= heater_start_temperature + 3;
-      if (!heater_saw_rise && (uint32_t)(heater_sample_us - heater_session_us) >= 5000000U) {
-        heater_sample_error = TS21_ERROR_HEATER_NO_RISE;
-      }
+    if (!ts21_heater_permitted() || !ts21_heater_needs_rise(heater_temperature)) {
+      heater_rise_tracking = false;
+    } else if (!heater_rise_tracking || heater_temperature >= heater_rise_temperature + TS21_HEATER_RISE_C) {
+      heater_rise_tracking    = true;
+      heater_rise_temperature = heater_temperature;
+      heater_rise_us          = heater_sample_us;
+    } else if ((uint32_t)(heater_sample_us - heater_rise_us) >= TS21_HEATER_RISE_US) {
+      heater_sample_error = TS21_ERROR_HEATER_NO_RISE;
     }
   }
-  if (heater_sample_error && heater_session_started) {
+  if (heater_sample_error && ts21_heater_permitted()) {
     ts21_heater_trip(heater_sample_error);
   }
 }
@@ -169,7 +168,7 @@ void setTipPWM(uint8_t pulse, bool fast) {
     irq_restore(state);
     return;
   }
-  if (heater_temperature >= TS21_HEATER_TARGET_C) {
+  if (heater_temperature >= TS21_HEATER_CUTOFF_C) {
     irq_restore(state);
     return;
   }
@@ -181,11 +180,6 @@ void setTipPWM(uint8_t pulse, bool fast) {
     compare = TS21_HEATER_PERIOD * 85 / 100;
   }
   if (compare) {
-    if (!heater_session_started) {
-      heater_session_started   = true;
-      heater_session_us        = now;
-      heater_start_temperature = heater_temperature;
-    }
     heater_command_us = now;
     heater_active     = true;
     heater_power_x10  = (uint8_t)(compare * heater_full_power_x10 / TS21_HEATER_PERIOD);
@@ -543,8 +537,7 @@ bool ts21_board_init(void) {
   adc_ready  = false;
   ts21_heater_inhibit();
 #ifdef TS21_HEATER_TEST
-  heater_session_started = false;
-  heater_saw_rise        = false;
+  heater_rise_tracking   = false;
   heater_sample_error    = TS21_ERROR_SENSOR;
 #endif
   for (unsigned bank = 0; bank < 8; ++bank) {

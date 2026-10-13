@@ -7,13 +7,14 @@
 
 #ifdef TS21_HEATER_TEST
 #include "ts21.h"
-#define TIP_CONTROL_PID
-#define TIP_PID_KP 1
-#define TIP_PID_KI 0
-#define TIP_PID_KD 0
+// Reuse the SEQURE S60/S60P C210 controller parameters, not its ADC/PWM calibration.
+#define TIP_THERMAL_MASS    10
+#define TIP_THERMAL_INERTIA 128
 #define BSP_HAS_POWER_READBACK
 #else
 #define HEATER_DISABLED 1
+#define TIP_THERMAL_MASS    0
+#define TIP_THERMAL_INERTIA 0
 #endif
 #define TEMP_DIRECT_ADC 1
 #define CUSTOM_MAX_TEMP_C
@@ -74,8 +75,8 @@
 #define POWER_LIMIT              (TS21_HEATER_POWER_X10 / 10U)
 #define MAX_POWER_LIMIT          POWER_LIMIT
 #define HARDWARE_MAX_WATTAGE_X10 TS21_HEATER_POWER_X10
-#define MAX_TEMP_C               TS21_HEATER_TARGET_C
-#define MAX_TEMP_F               176
+#define MAX_TEMP_C               TS21_HEATER_CUTOFF_C
+#define MAX_TEMP_F               212
 #define MIN_BOOST_TEMP_C         50
 #define MIN_BOOST_TEMP_F         122
 #else

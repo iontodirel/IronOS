@@ -36,10 +36,11 @@ extern "C" {
 #ifndef TS21_IRONOS
 #error "The standalone TS21 diagnostic must never enable heating"
 #endif
-#define TS21_HEATER_POWER_X10     50U
-#define TS21_HEATER_TARGET_C      80
-#define TS21_HEATER_CUTOFF_C      90
-#define TS21_HEATER_SESSION_US    UINT32_C(3000000)
+#define TS21_HEATER_POWER_X10     50
+#define TS21_HEATER_TARGET_C      90
+#define TS21_HEATER_CUTOFF_C      100
+#define TS21_HEATER_RISE_US       UINT32_C(20000000)
+#define TS21_HEATER_RISE_C        3
 #define TS21_HEATER_FRESH_US      UINT32_C(20000)
 #define TS21_HEATER_COMMAND_US    UINT32_C(150000)
 #define TS21_HEATER_WINDOW_MS     120U
@@ -132,6 +133,7 @@ void     ts21_fault(uint32_t error) __attribute__((noreturn));
 
 #ifdef TS21_HEATER_TEST
 bool     ts21_heater_permitted(void);
+bool     ts21_heater_needs_rise(int16_t temperature);
 void     ts21_heater_failed(void);
 void     ts21_heater_check(void);
 void     ts21_heater_trip(uint32_t error);

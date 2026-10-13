@@ -25,8 +25,11 @@ static bool              heaterButtonPressed;
 static volatile uint32_t lastGUIRead;
 
 bool ts21_heater_permitted(void) {
-  return heaterArmed && currentOperatingMode == OperatingMode::Soldering && currentTempTargetDegC > 0 && heaterThermalRunawayCounter <= 8 && (uint32_t)(ts21_micros() - lastGUIRead) < 500000U;
+  return heaterArmed && currentOperatingMode == OperatingMode::Soldering && currentTempTargetDegC > 0 && currentTempTargetDegC <= TS21_HEATER_CUTOFF_C && heaterThermalRunawayCounter <= 8 &&
+         (uint32_t)(ts21_micros() - lastGUIRead) < 500000U;
 }
+
+bool ts21_heater_needs_rise(int16_t temperature) { return currentTempTargetDegC - temperature >= TS21_HEATER_RISE_C; }
 
 void ts21_heater_failed(void) {
   heaterArmed                 = false;
@@ -152,7 +155,7 @@ void     showBootLogo() {
   setSettingValue(SettingsOptions::BoostTemp, 0);
   setSettingValue(SettingsOptions::KeepAwakePulse, 0);
   setSettingValue(SettingsOptions::PowerLimit, POWER_LIMIT);
-  setSettingValue(SettingsOptions::SolderingTemp, getSettingValue(SettingsOptions::TemperatureInF) ? MAX_TEMP_F : MAX_TEMP_C);
+  setSettingValue(SettingsOptions::SolderingTemp, getSettingValue(SettingsOptions::TemperatureInF) ? (TS21_HEATER_TARGET_C * 9 / 5 + 32) : TS21_HEATER_TARGET_C);
 #endif
 }
 bool     getHallSensorFitted() { return false; }
@@ -162,10 +165,8 @@ void     log_system_state(int32_t) {}
 bool     getFUS302IRQLow() { return false; }
 void     power_check() { ts21_uart_poll(); }
 uint8_t  getTipResistanceX10() { return sensorsValid ? ts21_tip_resistance_x10(&sensors) : 0; }
-#ifndef TIP_CONTROL_PID
-uint16_t getTipThermalMass() { return 0; }
-uint16_t getTipInertia() { return 0; }
-#endif
+uint16_t getTipThermalMass() { return TIP_THERMAL_MASS; }
+uint16_t getTipInertia() { return TIP_THERMAL_INERTIA; }
 uint8_t  preStartChecks() { return sensorsValid; }
 uint8_t  preStartChecksDone() { return sensorsValid; }
 bool     isTipShorted() {
@@ -194,7 +195,7 @@ uint64_t getDeviceID() {
 
 TemperatureType_t getCustomTipMaxInC() {
 #ifdef TS21_HEATER_TEST
-  return TS21_HEATER_TARGET_C;
+  return TS21_HEATER_CUTOFF_C;
 #else
   return 500;
 #endif

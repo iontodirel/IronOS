@@ -212,17 +212,20 @@ template <class T = TemperatureType_t> struct Integrator {
 #endif
 int32_t getPIDResultX10Watts(TemperatureType_t set_point, TemperatureType_t current_reading) {
   static TickType_t lastCall = 0;
+  const TickType_t  now      = xTaskGetTickCount();
 
 #ifdef TIP_CONTROL_PID
   static PID<TemperatureType_t, TIP_PID_KP, TIP_PID_KI, TIP_PID_KD, 5> pid = {0, 0};
 
-  const TickType_t interval = (xTaskGetTickCount() - lastCall);
+  const TickType_t interval = (now - lastCall);
 
 #else
   static Integrator<TemperatureType_t> powerStore = {0};
-  const TickType_t                     rate       = TICKS_SECOND / (xTaskGetTickCount() - lastCall);
+  const TickType_t                     elapsed    = now - lastCall;
+  // Start/resume at the nominal rate; idle gaps and same-tick calls must not divide by zero.
+  const TickType_t rate = elapsed && elapsed < TICKS_SECOND ? TICKS_SECOND / elapsed : PID_TIM_HZ;
 #endif
-  lastCall = xTaskGetTickCount();
+  lastCall = now;
   // Sandman note:
   // PID Challenge - we have a small thermal mass that we to want heat up as fast as possible but we don't
   // want to overshot excessively (if at all) the set point temperature. In the same time we have 'imprecise'

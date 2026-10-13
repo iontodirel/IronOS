@@ -23,6 +23,7 @@ parser.add_argument("--inherited-interrupt", action="store_true")
 parser.add_argument("--instructions", type=int, default=40000000)
 parser.add_argument("--max-frame-us", type=int)
 parser.add_argument("--check-cold-display", action="store_true")
+parser.add_argument("--fahrenheit", action="store_true")
 parser.add_argument(
     "--check-heater",
     choices=(
@@ -32,8 +33,8 @@ parser.add_argument(
         "supply",
         "overtemp",
         "stall",
-        "session",
-        "pulse",
+        "no-rise",
+        "continuous",
         "uart",
         "monitor",
     ),
@@ -103,7 +104,8 @@ class Board:
         self.last_watchdog = 0
         self.result = None
         self.heater_commands = 0
-        self.initial_session_us = None
+        self.first_heater_us = None
+        self.modulation_seen = False
         self.gate_started = None
         self.home_draws = 0
         self.button_started = None
@@ -133,7 +135,7 @@ class Board:
                     bytes(cpu.mem_read(symbols[source], symbol_sizes[source])),
                     symbol_sizes[buffer],
                 )
-        if args.check_heater and "heater_session_started" not in symbols:
+        if args.check_heater and "heater_rise_tracking" not in symbols:
             raise ValueError("--check-heater requires the heater-test firmware")
         self.recent = deque(maxlen=24)
         self.trace = {}
@@ -203,6 +205,7 @@ class Board:
         defaults[10] = 1  # Enter the real soldering UI through normal autostart.
         if args.check_heater:
             defaults[0] = 176  # Saved setpoint above the first-heating C limit.
+            defaults[15] = int(args.fahrenheit)
             defaults[18] = 20  # Saved power-bank keepalive must not bypass arming.
             defaults[22] = 176  # Saved boost must not bypass the test limit.
             defaults[24] = (
@@ -269,17 +272,17 @@ class Board:
         ):
             self.stop(f"FAIL: first-heating power/duty limit exceeded: CCR1={compare}")
             return
-        if compare != min(
-            640 * 50 * resistance // (voltage * voltage), 640 * 85 // 100
-        ):
+        maximum = min(640 * 50 * resistance // (voltage * voltage), 640 * 85 // 100)
+        if args.check_heater != "continuous" and compare != maximum:
             self.stop(
                 f"FAIL: cold fixture did not reach the requested 5 W ceiling: CCR1={compare}"
             )
             return
+        self.modulation_seen |= compare < maximum
         if (
             self.button_started is None
             or self.ram_value("currentOperatingMode", 1) != 1
-            or not 0 < self.ram_value("currentTempTargetDegC") <= 80
+            or self.ram_value("currentTempTargetDegC") != 90
         ):
             self.stop("FAIL: heating was not manually started with a bounded target")
             return
@@ -289,21 +292,15 @@ class Board:
         if args.check_heater == "uart" and not self.status_errors() & (1 << 4):
             self.stop("FAIL: passive UART receive error was not retained for diagnosis")
             return
-        if self.initial_session_us is None:
-            self.initial_session_us = self.ram_value("heater_session_us")
-        if (
-            args.check_heater == "pulse"
-            and self.micros() - self.initial_session_us >= 3000000
-        ):
-            self.stop("FAIL: heater pulse started after the three-second allowance")
-            return
+        if self.first_heater_us is None:
+            self.first_heater_us = self.micros()
         self.heater_commands += 1
         print(
             f"{self.micros():8d} us heater command {self.heater_commands}: "
             f"CCR1={compare}/640, target={self.ram_value('currentTempTargetDegC')} C",
             flush=True,
         )
-        if self.heater_commands == 3 and args.check_heater != "pulse":
+        if self.heater_commands == 3 and args.check_heater != "continuous":
             self.injected = True
             if args.check_heater in ("short", "uart"):
                 self.probe_delta = 0
@@ -312,13 +309,13 @@ class Board:
             elif args.check_heater == "supply":
                 self.input_adc = 0
             elif args.check_heater == "overtemp":
-                self.tip_adc = 1100
+                self.tip_adc = 963  # Exactly 100 C with the fixture handle temperature.
             elif args.check_heater == "monitor":
                 cpu.mem_write(symbols["heaterThermalRunawayCounter"], b"\xff")
-            elif args.check_heater == "session":
+            elif args.check_heater == "no-rise":
                 cpu.mem_write(
-                    symbols["heater_session_us"],
-                    struct.pack("<I", (self.micros() - 3000000) & 0xFFFFFFFF),
+                    symbols["heater_rise_us"],
+                    struct.pack("<I", (self.micros() - 20000000) & 0xFFFFFFFF),
                 )
             elif args.check_heater == "stall":
                 self.stall_requested = True
@@ -354,6 +351,31 @@ class Board:
         if mode != self.last_heater_mode:
             print(f"{self.micros():8d} us GUI mode {mode}", flush=True)
             self.last_heater_mode = mode
+        if (
+            args.check_heater == "continuous"
+            and self.first_heater_us is not None
+            and not self.injected
+            and self.micros() - self.first_heater_us >= 6000000
+        ):
+            if (
+                mode != 1
+                or self.status_errors()
+                or not self.modulation_seen
+                or self.ram_value("currentTempTargetDegC") != 90
+                or not self.ram_value("heaterArmed", 1)
+                or self.gate_high()
+                or self.registers.get(0x40000400, 0) & 1
+            ):
+                self.stop(
+                    "FAIL: controller did not regulate continuously beyond the old short limits"
+                )
+                return
+            self.injected = True
+            self.tip_adc = 963
+            print(
+                "Continuous control held the 90 C fixture; checking the exact 100 C cutoff",
+                flush=True,
+            )
         if self.injected and mode == 0:
             if self.fault_stage == "warning":
                 self.stop("FAIL: stop warning auto-dismissed without acknowledgment")
@@ -398,8 +420,8 @@ class Board:
                 "open": 1 << 15,
                 "supply": 1 << 14,
                 "overtemp": 1 << 12,
-                "session": 1 << 11,
-                "pulse": 1 << 11,
+                "no-rise": 1 << 13,
+                "continuous": 1 << 12,
                 "uart": 1 << 9,
                 "monitor": 1 << 16,
             }
@@ -435,28 +457,6 @@ class Board:
     def code(self, uc, pc, size, unused):
         self.steps += 1
         self.recent.append(pc)
-        if (
-            args.check_heater == "pulse"
-            and not self.injected
-            and pc == symbols["ts21_heater_trip"]
-        ):
-            elapsed = (
-                self.micros() - self.initial_session_us
-                if self.initial_session_us is not None
-                else 0
-            )
-            if (
-                uc.reg_read(UC_RISCV_REG_X0 + 10) != 1 << 11
-                or not 3000000 <= elapsed < 3002000
-                or self.heater_commands < 20
-            ):
-                self.stop(f"FAIL: unexpected full-pulse stop after {elapsed} us")
-                return
-            self.injected = True
-            print(
-                f"Three-second test stopped after {elapsed} us without advancing its timestamp",
-                flush=True,
-            )
         if args.check_heater and self.fault_stage == "home":
             if pc == symbols.get("isTipDisconnected"):
                 self.disconnect_return = uc.reg_read(UC_RISCV_REG_X0 + 1)
@@ -688,6 +688,13 @@ class Board:
                 return
             channel = self.registers.get(0x40012434)
             self.registers[0x40012400] = 2
+            if (
+                args.check_heater == "continuous"
+                and self.first_heater_us is not None
+                and not self.injected
+            ):
+                elapsed = self.micros() - self.first_heater_us
+                self.tip_adc = 580 + min(329, 329 * elapsed // 2000000)
             tip = self.tip_adc + (self.probe_delta if self.gpio[0x40010800] & 1 else 0)
             self.registers[0x4001244C] = {
                 1: tip,
