@@ -40,7 +40,7 @@ static uint32_t heater_full_power_x10;
 static uint16_t heater_max_compare;
 static int16_t  heater_temperature;
 static int16_t  heater_rise_temperature;
-static uint8_t  heater_power_x10;
+static uint16_t heater_power_x10;
 #endif
 
 static void modify(uint32_t address, uint32_t clear, uint32_t set) { ts21_mmio_write(address, (ts21_mmio_read(address) & ~clear) | set); }
@@ -182,7 +182,7 @@ void setTipPWM(uint8_t pulse, bool fast) {
   if (compare) {
     heater_command_us = now;
     heater_active     = true;
-    heater_power_x10  = (uint8_t)(compare * heater_full_power_x10 / TS21_HEATER_PERIOD);
+    heater_power_x10  = (uint16_t)(compare * heater_full_power_x10 / TS21_HEATER_PERIOD);
 
     // Reset inherited timer/remap state. Only TIM3 CH1 (PA6) and TIM1 CH3 (PA10) are enabled.
     modify(TS21_RCC + 0x18, 0, 1);

@@ -123,7 +123,7 @@ class Board:
         self.stall_requested = False
         self.tip_adc = 580
         self.probe_delta = 354
-        self.input_adc = 725
+        self.input_adc = 2900
         self.sample_adc = {}
         self.expected_fonts = {}
         if "font12_out_buffer" in symbols:
@@ -214,7 +214,7 @@ class Board:
             defaults[18] = 20  # Saved power-bank keepalive must not bypass arming.
             defaults[22] = 176  # Saved boost must not bypass the test limit.
             defaults[24] = (
-                2  # The prior image's saved 2 W limit must not hide the 5 W test.
+                5  # The prior 5 W setting must not hide the requested 100 W ceiling.
             )
         record = struct.pack("<HH" + "H" * count, 0x55AA, count, *defaults)
         cpu.mem_write(0x0800FC00, record.ljust(256, b"\xff"))
@@ -273,16 +273,23 @@ class Board:
         resistance = (self.sample_adc["probe"] - self.sample_adc["tip"]) * 10 // 177
         if (
             not 0 < compare <= 640 * 85 // 100
-            or compare * voltage * voltage > 50 * resistance * 640
+            or compare * voltage * voltage > 1000 * resistance * 640
         ):
             self.stop(f"FAIL: first-heating power/duty limit exceeded: CCR1={compare}")
             return
-        maximum = min(640 * 50 * resistance // (voltage * voltage), 640 * 85 // 100)
+        maximum = min(640 * 1000 * resistance // (voltage * voltage), 640 * 85 // 100)
         if (
             args.check_heater not in ("continuous", "range") or self.heater_commands < 3
         ) and compare != maximum:
             self.stop(
-                f"FAIL: cold fixture did not reach the requested 5 W ceiling: CCR1={compare}"
+                f"FAIL: cold fixture did not reach the requested 100 W ceiling: CCR1={compare}"
+            )
+            return
+        reported = self.ram_value("heater_power_x10", symbol_sizes["heater_power_x10"])
+        expected_power = compare * (voltage * voltage // resistance) // 640
+        if reported != expected_power:
+            self.stop(
+                f"FAIL: accepted-power readback truncated: {reported} != {expected_power}"
             )
             return
         self.modulation_seen |= compare < maximum

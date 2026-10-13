@@ -56,7 +56,7 @@ _PD Mode_ option in _Power settings_ submenu to _Safe_ or _Default_.
 
 ## Experimental TS21 development
 
-The [experimental TS21 port](source/Core/BSP/TS21/README.md) builds the normal IronOS interface with the heater **disabled by default**. A separate, explicitly selected C210 test build uses the SEQURE S60/S60P shared controller tuning and an estimated **5 W ceiling**, with normal **10..450 C / 50..850 F** temperature controls and preserved setpoints. The experimental 100 C cap and short session timer are removed; sensor, overtemperature, rise-watchdog and heater-gate protections remain. Sensor accuracy and higher-temperature behavior require independent measurement, and 5 W may be insufficient to reach high setpoints.
+The [experimental TS21 port](source/Core/BSP/TS21/README.md) builds the normal IronOS interface with the heater **disabled by default**. A separate, explicitly selected C210 build uses the SEQURE S60/S60P shared controller tuning and an estimated **100 W maximum**, matching Miniware's TS21 rating, with normal **10..450 C / 50..850 F** temperature controls and preserved setpoints. This is a ceiling, not constant output or a guarantee of a 100 W PD contract. The experimental 100 C cap and short session timer are removed; sensor, overtemperature, rise-watchdog and heater-gate protections remain. Sensor accuracy, supply suitability and full-load electrical/thermal behavior require independent measurement.
 The full 128x32 UI and low-temperature response have been observed on a TS21; powered operation, sensor accuracy and electrical fault shutdown still need hardware validation. This is not supported soldering firmware and is excluded from release builds.
 
 ## Getting Started

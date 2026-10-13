@@ -612,7 +612,7 @@ static void test_sensor_conversion(void) {
 }
 
 #ifdef TS21_HEATER_TEST
-_Static_assert(TS21_HEATER_POWER_X10 == 50U, "The requested test ceiling is 5 W");
+_Static_assert(TS21_HEATER_POWER_X10 == 1000U, "The requested ceiling is 100 W");
 _Static_assert(TS21_HEATER_RISE_US == 20000000U, "Use the C210 twenty-second rise-fault interval");
 _Static_assert(TS21_DEFAULT_TEMP_C == 320 && TS21_HEATER_CUTOFF_C == 500, "Use normal setpoints with a separate overtemperature fault threshold");
 
@@ -691,6 +691,24 @@ static void test_bounded_heater(void) {
       assert(getTipX10Watts() > 0 && getTipX10Watts() <= TS21_HEATER_POWER_X10);
     }
   }
+
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  assert(*reg(TS21_TIM3 + 0x34) == 544);
+  assert(getTipX10Watts() == 106); // A 5 V source cannot supply 100 W into this fixture.
+
+  prepare_heater();
+  adc_fixture.input = 2900;
+  sample_heater();
+  setTipPWM(255, false);
+  assert(*reg(TS21_TIM3 + 0x34) == 316);
+  assert(getTipX10Watts() == 997); // 20 V: retain tenths-watt values above the old 8-bit range.
+  ticks += 1000U * TS21_TIMER_TICKS_PER_US;
+  assert(gate_high());
+  ticks += TS21_HEATER_WINDOW_MS * 1000U * TS21_TIMER_TICKS_PER_US;
+  assert(!gate_high() && !(*reg(TS21_TIM1) & 1U));
+  assert(getTipX10Watts() == 0);
 }
 
 static void test_heater_faults(void) {
@@ -713,17 +731,17 @@ static void test_heater_faults(void) {
   sample_heater();
   setTipPWM(255, false);
   assert(ts21_status.errors == 0);
-  assert(getTipX10Watts() == 50);
+  assert(getTipX10Watts() == 106);
   adc_fixture.tip       = 2180; // 320 C.
   adc_fixture.tip_probe = 2534;
   sample_heater();
   setTipPWM(255, false);
-  assert(ts21_status.errors == 0 && getTipX10Watts() == 50);
+  assert(ts21_status.errors == 0 && getTipX10Watts() == 106);
   adc_fixture.tip       = 3321; // 499 C.
   adc_fixture.tip_probe = 3675;
   sample_heater();
   setTipPWM(255, false);
-  assert(ts21_status.errors == 0 && getTipX10Watts() == 50);
+  assert(ts21_status.errors == 0 && getTipX10Watts() == 106);
   adc_fixture.tip       = 3328; // Exactly 500 C.
   adc_fixture.tip_probe = 3682;
   sample_heater();
@@ -854,7 +872,7 @@ static void test_continuous_temperature_control(void) {
       setTipPWM(255, false);
       ts21_heater_check();
       assert(ts21_status.errors == 0);
-      assert(getTipX10Watts() == 50);
+      assert(getTipX10Watts() == 106);
     }
 
     if (wrap) {
@@ -936,7 +954,7 @@ int main(void) {
   test_heater_faults();
   test_continuous_temperature_control();
   test_passive_uart_heater();
-  puts("TS21 heater tests passed: 5 W cap, finite gate, normal temperatures, overtemperature cutoff and rise watchdog");
+  puts("TS21 heater tests passed: 100 W ceiling, wide power readback, low-supply limits and fault protection");
 #endif
   puts("TS21 host tests passed: protocol, inhibit ordering, button mapping, clocks, ADC, UART, I2C and bounded failures");
   return 0;

@@ -51,15 +51,15 @@ temperature is preserved rather than forced back to the earlier 90 C test
 setpoint. The usual **10..450 C / 50..850 F** controls are available; the
 factory default is **320 C**. The experimental 100 C ceiling is removed,
 not the normal setpoint limits or fault protections.
-The power-limit setting is initialized to 5 W in RAM,
-including when the previous build saved a 2 W limit; it can still be reduced
+The power-limit setting is initialized to 100 W in RAM,
+including when the previous build saved a 5 W limit; it can still be reduced
 in settings but cannot raise the driver's ceiling.
 A bottom-button press/release from home is required
 to arm heating; the top button still opens settings. Heating is only permitted
 in the ordinary soldering mode, with a positive target and fresh GUI activity.
 The screen stays awake during this bench test.
 
-The estimated output is capped at **5 W**, independently of the user's voltage
+The estimated output is capped at **100 W**, independently of the user's voltage
 calibration or requested PWM. The controller is the same shared IronOS
 decaying-integrator path used by SEQURE S60/S60P, with their C210 parameters:
 thermal mass 10 and inertia 128. S99 is a C245 model with different tuning.
@@ -69,9 +69,20 @@ are not portable to this board. Starting/resuming the shared controller after
 idle, or calling it twice in one tick, uses the nominal rate rather than
 dividing by zero.
 
-[JBC specifies 40 W peak for its genuine T210/C210 handle](https://www.jbctools.com/product_datasheet.php?id=48).
-That is not a verified power rating for every compatible cartridge or for this
-experimental TS21 port; this build remains limited to an estimated 5 W.
+[Miniware specifies adjustable power up to 100 W for the TS21](https://e-design.com.cn/ProductDetail/10747118.html),
+with PD input and 210-series tips. That is the device rating used for this
+ceiling, not a command to continuously apply 100 W. The separate
+[JBC T210 handle's 40 W peak rating](https://www.jbctools.com/product_datasheet.php?id=48)
+is not the TS21's rating; neither specification establishes that every
+replacement cartridge or power source is suitable for the same conditions.
+
+For a 100 W-capable setup within this port's voltage range, use a suitable
+20 V / 5 A PD source and a 5 A e-marked cable, with a suitable TS21 cartridge.
+The port does not issue active PD requests or establish the negotiated current
+budget from its passive telemetry. A 100 W setting does not itself obtain a
+100 W contract. Use a lower user power limit before heating if the qualified
+source/cartridge limit is lower. Actual output is also bounded by voltage,
+resistance and the retained 85% carrier duty ceiling.
 
 Requests consume a valid sensor sample no older than
 20 ms. Each accepted request produces at most a 120 ms gate pulse, with a
@@ -95,8 +106,8 @@ later stuck reading is not excused by an earlier successful rise.
 The rise check uses the same effective Celsius target as the shared controller:
 the 850 F selection converts to 454 C, but the controller limits it to 450 C.
 That normal conversion must not produce a false no-rise fault at 450 C.
-At only 5 W, higher setpoints may be slow or unreachable; do not bypass a
-protection trip to compensate for insufficient power.
+An inadequate supply can still make setpoints slow or unreachable; do not
+bypass a protection trip to compensate for insufficient power.
 
 These are sensor-based controls, not unconditional physical temperature
 guarantees. Calibration error, thermal overshoot or a failed power device
@@ -173,6 +184,9 @@ rollover. Normal-temperature operation and the 499/500 C fault boundary are
 checked explicitly. Power history uses the accepted
 timer duty's raw-ADC-based power estimate, rather than a second lossy conversion
 through eight-bit PWM or reporting rejected requests as delivered power.
+The stored tenths-watt readback is 16-bit, so values above 25.5 W do not wrap.
+Tests explicitly cover both the low-voltage duty-limited output and the
+approximately 99.7 W quantized estimate on the 20 V / 2 ohm fixture.
 
 The optional actual-ELF emulator also exercises the real GUI and PID task:
 
@@ -187,11 +201,11 @@ python3 source/Core/BSP/TS21/tools/emulate_boot.py \
 Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `continuous`, `range`,
 `no-rise`, `uart` and `monitor`, and
 exercise both interrupt-inherited and reset-context entry. It seeds saved
-autostart/boost/keepalive, a saved normal-range setpoint and the previous 2 W power
+autostart/boost/keepalive, a saved normal-range setpoint and the previous 5 W power
 setting, verifies unarmed startup, presses/releases the real
 bottom GPIO input, and requires bounded nonzero output before fault injection.
-The cold fixture must reach the new 5 W ceiling rather than merely producing
-some output.
+The cold 20 V fixture must reach the new 100 W ceiling within timer resolution,
+with untruncated power accounting, rather than merely producing some output.
 It also ages the cold soldering screen's inactivity timestamps and rejects
 display blanking in this bench variant.
 Fault runs require output inhibition, a fully rendered stop code that stays
@@ -206,7 +220,7 @@ ensure every other error bit still inhibits output, including when combined
 with a UART error.
 The `no-rise` run ages only the rise-watchdog timestamp for a fault check.
 The `range` run verifies that a saved 320 C or 850 F selection is retained,
-can heat above the old 100 C ceiling within 5 W, and does not trigger the
+can heat above the old 100 C ceiling within the power limit, and does not trigger the
 rise watchdog at its effective target. It then checks the 500 C fault cutoff.
 Use `--check-heater range --instructions 200000000`, with `--fahrenheit` for
 the upper Fahrenheit setting.
