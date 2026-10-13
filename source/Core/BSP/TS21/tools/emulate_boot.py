@@ -35,6 +35,7 @@ parser.add_argument(
         "session",
         "no-rise",
         "uart",
+        "monitor",
     ),
 )
 args = parser.parse_args()
@@ -92,6 +93,8 @@ class Board:
         self.display_bytes = 0
         self.frame_start = None
         self.frame_bytes = 0
+        self.frame_pixels = bytearray()
+        self.latest_frame = None
         self.frames_us = []
         self.display_on = False
         self.idle_check_started = False
@@ -103,8 +106,11 @@ class Board:
         self.gate_started = None
         self.home_draws = 0
         self.button_started = None
+        self.button_mask = 1
         self.injected = False
         self.fault_draws = 0
+        self.fault_stage = "waiting"
+        self.disconnect_return = None
         self.last_heater_mode = None
         self.stall_requested = False
         self.tip_adc = 580
@@ -288,6 +294,8 @@ class Board:
                 self.input_adc = 0
             elif args.check_heater == "overtemp":
                 self.tip_adc = 1100
+            elif args.check_heater == "monitor":
+                cpu.mem_write(symbols["heaterThermalRunawayCounter"], b"\xff")
             elif args.check_heater in ("session", "no-rise"):
                 age = 10000000 if args.check_heater == "session" else 5000000
                 cpu.mem_write(
@@ -310,11 +318,30 @@ class Board:
         else:
             self.result = "PASS: hardware gate expired with no further CPU instructions"
 
+    def check_fault_pixels(self, error):
+        expected = bytearray(256)
+        font = symbols["font06_out_buffer"]
+        for i, digit in enumerate(f"{error:08X}"):
+            glyph = cpu.mem_read(font + int(digit, 16) * 16, 16)
+            for page in range(2):
+                offset = page * 128 + 32 + i * 8
+                expected[offset : offset + 8] = glyph[page * 8 : page * 8 + 8]
+        if self.latest_frame is None or self.latest_frame[256:] != expected:
+            self.stop(f"FAIL: stop code {error:08X} is not fully visible on the OLED")
+            return False
+        return True
+
     def check_heater_gui(self):
         mode = self.ram_value("currentOperatingMode", 1)
         if mode != self.last_heater_mode:
             print(f"{self.micros():8d} us GUI mode {mode}", flush=True)
             self.last_heater_mode = mode
+        if self.injected and mode == 0:
+            if self.fault_stage == "warning":
+                self.stop("FAIL: stop warning auto-dismissed without acknowledgment")
+                return
+            if self.fault_stage == "acknowledging":
+                self.fault_stage = "home"
         if mode == 1 and not self.idle_check_started:
             inactive_since = struct.pack(
                 "<I", (self.ram_value("xTickCount") - 61000) & 0xFFFFFFFF
@@ -356,6 +383,7 @@ class Board:
                 "session": 1 << 11,
                 "no-rise": 1 << 13,
                 "uart": 1 << 9,
+                "monitor": 1 << 16,
             }
             error = self.status_errors()
             if (
@@ -365,7 +393,16 @@ class Board:
                 and not self.ram_value("heaterArmed", 1)
             ):
                 self.fault_draws += 1
-                if self.fault_draws >= 2:
+                if self.fault_stage == "waiting":
+                    self.fault_stage = "warning"
+                if self.fault_stage == "warning" and self.fault_draws >= 4:
+                    if not self.check_fault_pixels(error & ~(1 << 4)):
+                        return
+                    self.fault_stage = "acknowledging"
+                    self.button_mask = 2
+                    self.button_started = self.micros()
+                    print("Acknowledging the persistent stop warning", flush=True)
+                elif self.fault_stage == "retrying" and self.fault_draws >= 2:
                     fault = (
                         "short after a passive UART receive error"
                         if args.check_heater == "uart"
@@ -373,12 +410,32 @@ class Board:
                     )
                     self.stop(
                         f"PASS: {fault} fault latched, heater off, "
-                        "normal IronOS protection warning displayed"
+                        "stop code visible until acknowledged, tip state accurate, "
+                        "restart refused"
                     )
 
     def code(self, uc, pc, size, unused):
         self.steps += 1
         self.recent.append(pc)
+        if args.check_heater and self.fault_stage == "home":
+            if pc == symbols.get("isTipDisconnected"):
+                self.disconnect_return = uc.reg_read(UC_RISCV_REG_X0 + 1)
+            elif pc == self.disconnect_return:
+                disconnected = bool(uc.reg_read(UC_RISCV_REG_X0 + 10))
+                expected = args.check_heater in ("short", "open", "uart")
+                if disconnected != expected:
+                    self.stop(
+                        "FAIL: latched heater stop is confused with tip connection"
+                    )
+                    return
+                self.fault_stage = "retrying"
+                self.fault_draws = 0
+                self.button_mask = 1
+                self.button_started = self.micros()
+                print(
+                    "Checking that a bottom-button retry cannot restart heating",
+                    flush=True,
+                )
         if pc in self.trace and pc not in self.seen:
             if (args.check_cold_display or args.check_heater) and pc == symbols["main"]:
                 self.seed_cold_display_settings()
@@ -512,7 +569,7 @@ class Board:
                 self.button_started is not None
                 and self.micros() - self.button_started < 120000
             ):
-                result &= ~(1 << 7)
+                result &= ~((1 << 7) if self.button_mask == 1 else (1 << 5))
         elif address == 0x40010C08:
             result = self.gpio[0x40010C00]
             if self.i2c_active and self.i2c_pulses and self.i2c_pulses % 9 == 0:
@@ -568,12 +625,15 @@ class Board:
                         if self.i2c_packet == [0x78, 0x00, 0xB0]:
                             self.frame_start = self.micros()
                             self.frame_bytes = 0
+                            self.frame_pixels.clear()
                         if self.i2c_packet[:2] == [0x78, 0x40]:
                             count = len(self.i2c_packet) - 2
                             self.display_bytes += count
                             self.frame_bytes += count
+                            self.frame_pixels.extend(self.i2c_packet[2:])
                             if self.frame_start is not None and self.frame_bytes == 512:
                                 self.frames_us.append(self.micros() - self.frame_start)
+                                self.latest_frame = bytes(self.frame_pixels)
                                 self.frame_start = None
                 if self.i2c_active and not old & scl and new & scl:
                     self.i2c_pulses += 1

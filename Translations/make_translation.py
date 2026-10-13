@@ -83,6 +83,10 @@ def filter_translation(lang: dict, defs: dict, macros: frozenset):
                 lang[category][record["id"]]["description"] = ""
 
     for _, record in enumerate(defs["messagesWarn"]):
+        if "default" in record:
+            lang["messagesWarn"].setdefault(
+                record["id"], {"message": record["default"]}
+            )
         if check_excluded(record):
             lang["messagesWarn"][record["id"]]["message"] = ""
 

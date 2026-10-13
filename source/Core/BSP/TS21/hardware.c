@@ -88,8 +88,10 @@ void ts21_heater_inhibit(void) {
 void ts21_watchdog_refresh(void) { ts21_mmio_write(TS21_IWDG, 0xAAAA); }
 
 #ifdef TS21_HEATER_TEST
-static void heater_trip(uint32_t error) {
+void ts21_heater_trip(uint32_t error) {
   ts21_heater_inhibit();
+  // A stopped test must not acquire a later timeout/no-rise fault while cooling.
+  heater_session_started = false;
   ts21_status.errors |= error;
   ts21_heater_failed();
 }
@@ -101,9 +103,9 @@ void ts21_heater_check(void) {
     ts21_heater_inhibit();
   }
   if (heater_session_started && !(ts21_status.errors & TS21_ERROR_HEATER_TIMEOUT) && (uint32_t)(now - heater_session_us) >= TS21_HEATER_SESSION_US) {
-    heater_trip(TS21_ERROR_HEATER_TIMEOUT);
+    ts21_heater_trip(TS21_ERROR_HEATER_TIMEOUT);
   } else if (heater_active && (uint32_t)(now - heater_command_us) >= TS21_HEATER_COMMAND_US) {
-    heater_trip(TS21_ERROR_HEATER_STALE);
+    ts21_heater_trip(TS21_ERROR_HEATER_STALE);
   }
   irq_restore(state);
 }
@@ -142,7 +144,7 @@ static void heater_record_sample(const struct TS21Sample *sample) {
     }
   }
   if (heater_sample_error && heater_session_started) {
-    heater_trip(heater_sample_error);
+    ts21_heater_trip(heater_sample_error);
   }
 }
 
@@ -156,13 +158,14 @@ void setTipPWM(uint8_t pulse, bool fast) {
   ts21_heater_check();
   const bool     ready = heater_sample_ready;
   const uint32_t now   = ts21_micros();
+  const uint32_t error = ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS;
   ts21_heater_inhibit();
   if (!pulse || !ts21_heater_permitted()) {
     irq_restore(state);
     return;
   }
-  if ((ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS) || heater_sample_error || !ready || (uint32_t)(now - heater_sample_us) > TS21_HEATER_FRESH_US) {
-    heater_trip(heater_sample_error ? heater_sample_error : TS21_ERROR_HEATER_STALE);
+  if (error || heater_sample_error || !ready || (uint32_t)(now - heater_sample_us) > TS21_HEATER_FRESH_US) {
+    ts21_heater_trip(error ? error : heater_sample_error ? heater_sample_error : TS21_ERROR_HEATER_STALE);
     irq_restore(state);
     return;
   }

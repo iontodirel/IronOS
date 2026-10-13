@@ -71,9 +71,38 @@ above 90 C inhibit output. Faults latch until reboot. If the indicated tip
 temperature has not risen at least 3 C after 5 seconds, it stops. Regardless of
 temperature response, the session ends 10 seconds after its first nonzero
 request; exiting/reentering soldering does not renew that allowance.
-The existing IronOS thermal-protection warning is used for these latched stops,
-including the test-session timeout; that warning does not by itself establish
-that physical thermal runaway occurred. Unplug after recording the response.
+The normal warning screen now says **Heating stopped** and shows an eight-digit
+hexadecimal stop code. It stays visible until a button acknowledges it, even
+if the last button press was more than five seconds ago. Acknowledging it does
+not clear the fault: the home screen reports the current tip connection, and
+another bottom-button start only reopens the stop warning without arming or
+heating. Passive UART diagnostic bits are excluded from this displayed code.
+The test clock stops with the fault, so cooling afterward does not add a
+misleading session timeout or no-rise fault.
+
+| Stop code | Meaning |
+| --- | --- |
+| `00002000` | Less than 3 C indicated rise within 5 seconds |
+| `00000800` | The 10-second test allowance expired |
+| `00000400` | Missing, consumed or stale sensor/control update |
+| `00000200` | Resistance below the short-circuit threshold |
+| `00008000` | Open/clipped or out-of-range high resistance reading |
+| `00004000` | Input voltage outside the accepted test range |
+| `00001000` | Tip/handle temperature outside the accepted range |
+| `00000100` | Invalid sensor conversion |
+| `00010000` | The shared IronOS thermal monitor stopped heating |
+
+Codes are a bitmask; multiple flags can be combined. Other bits are defined in
+`ts21.h`. A shared thermal-monitor stop is also latched by the board driver
+before it is displayed, so acknowledging it cannot permit a restart.
+Unplug after recording the code and readings.
+
+The earlier heater images used **Thermal Runaway** for every latched stop,
+then automatically dismissed it using the time since the last button press.
+They also presented any latched heater fault as **tip disconnected**.
+Thus a no-rise/test-timeout stop could produce both reported messages without
+an unplugged cartridge or an observed overtemperature. Those messages alone
+cannot identify what actually stopped the physical device.
 
 ### Heater evidence and implementation
 
@@ -122,13 +151,16 @@ python3 source/Core/BSP/TS21/tools/emulate_boot.py \
   --check-heater short --instructions 160000000
 ```
 
-Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `no-rise`, `session` and `uart`, and
+Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `no-rise`,
+`session`, `uart` and `monitor`, and
 exercise both interrupt-inherited and reset-context entry. It seeds saved
 autostart/boost/keepalive, verifies unarmed startup, presses/releases the real
 bottom GPIO input, and requires bounded nonzero output before fault injection.
 It also ages the cold soldering screen's inactivity timestamps and rejects
 display blanking in this bench variant.
-Fault runs require output inhibition and the ordinary protection-warning UI;
+Fault runs require output inhibition, a fully rendered stop code that stays
+until acknowledged, correct tip-connection reporting afterward and rejection
+of a bottom-button restart;
 the stall run advances only the timer model after CPU execution is stopped.
 The `uart` run injects a receive overrun before the home-screen button action,
 requires the diagnostic error to stay recorded while a valid tip can heat

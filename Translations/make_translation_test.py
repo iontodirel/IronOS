@@ -6,6 +6,31 @@ import unittest
 
 
 class TestMakeTranslation(unittest.TestCase):
+    def test_heater_stop_warning_is_localized_and_variant_specific(self):
+        import make_translation as translation
+
+        defs = translation.load_json(translation.HERE / "translations_definitions.json")
+        for filename in translation.HERE.glob("translation_*.json"):
+            for heater_test in (False, True):
+                lang = translation.load_json(filename)
+                original = lang["messagesWarn"]["WarningThermalRunaway"]["message"]
+                expected = lang["messagesWarn"].get(
+                    "WarningHeaterStopped", {"message": "Heating stopped\n"}
+                )["message"]
+                macros = (
+                    frozenset(("TS21_HEATER_TEST",)) if heater_test else frozenset()
+                )
+                with self.subTest(language=lang["languageCode"], heater=heater_test):
+                    result = translation.filter_translation(lang, defs, macros)
+                    self.assertEqual(
+                        result["messagesWarn"]["WarningHeaterStopped"]["message"],
+                        expected if heater_test else "",
+                    )
+                    self.assertEqual(
+                        result["messagesWarn"]["WarningThermalRunaway"]["message"],
+                        "" if heater_test else original,
+                    )
+
     def test_single_language_initializes_both_compressed_fonts(self):
         import make_translation as translation
 

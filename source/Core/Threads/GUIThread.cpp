@@ -146,7 +146,14 @@ OperatingMode guiHandleDraw(void) {
     break;
   case OperatingMode::ThermalRunaway:
 #ifdef TS21_HEATER_TEST
-    newMode = warnUser(translatedString(Tr->WarningThermalRunaway), buttons) ? OperatingMode::HomeScreen : OperatingMode::ThermalRunaway;
+    if (!(ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS)) {
+      ts21_heater_trip(TS21_ERROR_HEATER_MONITOR);
+    }
+    // Keep the stop visible until acknowledged, regardless of prior button inactivity.
+    warnUser(translatedString(Tr->WarningHeaterStopped), BUTTON_NONE);
+    OLED::setCursor(32, 16);
+    OLED::drawHex(ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS, FontStyle::SMALL, 8);
+    newMode = buttons != BUTTON_NONE ? OperatingMode::HomeScreen : OperatingMode::ThermalRunaway;
 #else
     /*TODO*/
     newMode = OperatingMode::HomeScreen;

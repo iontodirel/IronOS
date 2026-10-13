@@ -688,6 +688,19 @@ static void test_bounded_heater(void) {
 
 static void test_heater_faults(void) {
   prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  ts21_heater_trip(TS21_ERROR_HEATER_MONITOR);
+  assert(ts21_status.errors == TS21_ERROR_HEATER_MONITOR);
+  assert(heater_failures == 1 && !heater_permitted);
+  assert_heater_off();
+  heater_permitted = true;
+  sample_heater();
+  setTipPWM(255, false);
+  assert(ts21_status.errors == TS21_ERROR_HEATER_MONITOR);
+  assert_heater_off();
+
+  prepare_heater();
   adc_fixture.tip       = 858;
   adc_fixture.tip_probe = 1212;
   sample_heater();
@@ -790,6 +803,17 @@ static void test_heater_faults(void) {
   sample_heater();
   assert(ts21_status.errors & TS21_ERROR_HEATER_NO_RISE);
   assert_heater_off();
+  const unsigned stopped_failures = heater_failures;
+  ticks += (uint64_t)TS21_HEATER_SESSION_US * TS21_TIMER_TICKS_PER_US;
+  sample_heater();
+  ts21_heater_check();
+  assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
+  assert(heater_failures == stopped_failures);
+  heater_permitted = true;
+  sample_heater();
+  setTipPWM(255, false);
+  assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
+  assert_heater_off();
 
   prepare_heater();
   ticks = ((uint64_t)UINT32_MAX - 5000000U) * TS21_TIMER_TICKS_PER_US;
@@ -800,7 +824,9 @@ static void test_heater_faults(void) {
   assert(ts21_status.errors & TS21_ERROR_HEATER_TIMEOUT);
   assert_heater_off();
   const unsigned failures = heater_failures;
+  sample_heater();
   ts21_heater_check();
+  assert(ts21_status.errors == TS21_ERROR_HEATER_TIMEOUT);
   assert(heater_failures == failures);
 }
 

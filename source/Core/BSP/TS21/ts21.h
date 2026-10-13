@@ -67,6 +67,7 @@ enum TS21Error {
   TS21_ERROR_HEATER_NO_RISE = 1U << 13,
   TS21_ERROR_HEATER_SUPPLY  = 1U << 14,
   TS21_ERROR_HEATER_OPEN    = 1U << 15,
+  TS21_ERROR_HEATER_MONITOR = 1U << 16,
 };
 
 #ifdef TS21_HEATER_TEST
@@ -133,6 +134,7 @@ void     ts21_fault(uint32_t error) __attribute__((noreturn));
 bool     ts21_heater_permitted(void);
 void     ts21_heater_failed(void);
 void     ts21_heater_check(void);
+void     ts21_heater_trip(uint32_t error);
 uint32_t getTipX10Watts(void);
 #endif
 

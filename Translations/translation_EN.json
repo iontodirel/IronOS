@@ -30,6 +30,9 @@
     "WarningThermalRunaway": {
       "message": "Thermal\nRunaway"
     },
+    "WarningHeaterStopped": {
+      "message": "Heating stopped\n"
+    },
     "WarningTipShorted": {
       "message": "!Tip Shorted!"
     },

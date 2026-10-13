@@ -17,6 +17,7 @@ static TickType_t ticks;
 static uint16_t   inputVoltage = 50;
 #ifdef TS21_HEATER_TEST
 static uint8_t actualPWM;
+volatile struct TS21Status ts21_status;
 #endif
 
 void setTipPWM(uint8_t pulse, bool) {
@@ -63,6 +64,14 @@ static void testButtonActions() {
   const ButtonState bottom = getButtonState();
   assert(bottom == BUTTON_F_SHORT);
   assert(handleHomeButtons(bottom, &context) == OperatingMode::Soldering);
+#ifdef TS21_HEATER_TEST
+  ts21_status.errors = TS21_ERROR_HEATER_NO_RISE;
+  assert(handleHomeButtons(bottom, &context) == OperatingMode::ThermalRunaway);
+  assert(handleHomeButtons(top, &context) == OperatingMode::SettingsMenu);
+  ts21_status.errors = TS21_ERROR_UART;
+  assert(handleHomeButtons(bottom, &context) == OperatingMode::Soldering);
+  ts21_status.errors = 0;
+#endif
   buttons = 2;
   assert(getButtonState() == BUTTON_NONE);
   ticks += 399;

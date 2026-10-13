@@ -35,7 +35,15 @@
     },
     {
       "id": "WarningThermalRunaway",
+      "exclude": ["TS21_HEATER_TEST"],
       "description": "Warning text shown when the software has disabled the heater as a safety precaution as the temperature reading didn't react as expected."
+    },
+    {
+      "id": "WarningHeaterStopped",
+      "default": "Heating stopped\n",
+      "include": ["TS21_HEATER_TEST"],
+      "maxLen": 15,
+      "description": "First line above a latched heater-stop code. Keep the trailing newline to use the small font and leave the second line for the code."
     },
     {
       "id": "WarningTipShorted",
