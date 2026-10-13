@@ -1,6 +1,6 @@
 # Experimental TS21 IronOS port
 
-## Bounded first-heating build
+## Bounded 5 W / three-second build
 
 `ts21-ironos` still hard-disables heating. The separate opt-in below builds the
 normal IronOS UI with a real, restricted heater path:
@@ -47,12 +47,15 @@ the soldering screen open.
 
 On each boot it starts unarmed at the normal home screen. Saved autostart,
 boost and power-bank keepalive are overridden in RAM, and the setpoint is
-limited to 80 C (176 F). A bottom-button press/release from home is required
+limited to 80 C (176 F). The power-limit setting is initialized to 5 W in RAM,
+including when the previous build saved a 2 W limit; it can still be reduced
+in settings but cannot raise the driver's ceiling.
+A bottom-button press/release from home is required
 to arm heating; the top button still opens settings. Heating is only permitted
 in the ordinary soldering mode, with a positive target and fresh GUI activity.
 The screen stays awake during this bench test.
 
-The estimated output is capped at **2 W**, independently of the user's voltage
+The estimated output is capped at **5 W**, independently of the user's voltage
 calibration or requested PWM, and the driver refuses further output at an
 indicated 80 C even if a keepalive request bypasses the controller.
 The controller is the existing PID template with
@@ -67,10 +70,16 @@ This image accepts measured resistance from 1.0 through 10.0 ohms and input
 voltage from 4.5 through 21.0 V; these are conservative test acceptance bounds,
 not claimed cartridge specifications. Short/open resistance, invalid sensors,
 invalid supply, handle temperature outside 0..60 C and tip temperature at or
-above 90 C inhibit output. Faults latch until reboot. If the indicated tip
-temperature has not risen at least 3 C after 5 seconds, it stops. Regardless of
-temperature response, the session ends 10 seconds after its first nonzero
+above 90 C inhibit output. Faults latch until reboot. Regardless of
+temperature response, the session ends **3 seconds** after its first nonzero
 request; exiting/reentering soldering does not renew that allowance.
+This is nominally up to 15 J of estimated energy, not a measured energy or
+temperature guarantee. The duration is a software session deadline; the
+independent hardware gate still bounds an individual pulse if execution stalls.
+The retained 5-second/3 C no-rise check cannot normally run before this
+shorter session ends, so this pulse is not a test of that protection or proof
+of valid temperature feedback. Use an independent thermometer. The previous
+2 W / 10-second artifacts remain a separate, unchanged earlier test stage.
 The normal warning screen now says **Heating stopped** and shows an eight-digit
 hexadecimal stop code. It stays visible until a button acknowledges it, even
 if the last button press was more than five seconds ago. Acknowledging it does
@@ -82,8 +91,8 @@ misleading session timeout or no-rise fault.
 
 | Stop code | Meaning |
 | --- | --- |
-| `00002000` | Less than 3 C indicated rise within 5 seconds |
-| `00000800` | The 10-second test allowance expired |
+| `00002000` | Retained 5-second no-rise guard; not normally reached in this 3-second test |
+| `00000800` | The 3-second test allowance expired |
 | `00000400` | Missing, consumed or stale sensor/control update |
 | `00000200` | Resistance below the short-circuit threshold |
 | `00008000` | Open/clipped or out-of-range high resistance reading |
@@ -151,11 +160,13 @@ python3 source/Core/BSP/TS21/tools/emulate_boot.py \
   --check-heater short --instructions 160000000
 ```
 
-Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `no-rise`,
+Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `pulse`,
 `session`, `uart` and `monitor`, and
 exercise both interrupt-inherited and reset-context entry. It seeds saved
-autostart/boost/keepalive, verifies unarmed startup, presses/releases the real
+autostart/boost/keepalive and the previous 2 W power setting, verifies unarmed startup, presses/releases the real
 bottom GPIO input, and requires bounded nonzero output before fault injection.
+The cold fixture must reach the new 5 W ceiling rather than merely producing
+some output.
 It also ages the cold soldering screen's inactivity timestamps and rejects
 display blanking in this bench variant.
 Fault runs require output inhibition, a fully rendered stop code that stays
@@ -168,8 +179,13 @@ within the existing bounds, and then requires a short-circuit fault to stop
 output normally. Native checks cover all four UART receive-error flags and
 ensure every other error bit still inhibits output, including when combined
 with a UART error.
-No-rise/session runs age the session timestamp without skipping scheduler
-execution; they are not five/ten-second hardware endurance tests.
+The `session` run ages only the session timestamp for a quick cutoff check.
+The `pulse` run executes the full three seconds of modeled control with a
+constant temperature input, checks the timeout within one tick plus simulation
+overhead, and confirms acknowledgment cannot restart it. Use
+`--check-heater pulse --instructions 360000000` for its longer instruction budget.
+Native tests also check the exact 2,999,999/3,000,000 us boundary across counter
+rollover. These are not hardware timing, energy or thermal measurements.
 Compressed font buffers are compared byte-for-byte against host decompression.
 This remains instruction/peripheral simulation, not electrical or thermal
 validation of a TS21.

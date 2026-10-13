@@ -609,6 +609,10 @@ static void test_sensor_conversion(void) {
 }
 
 #ifdef TS21_HEATER_TEST
+_Static_assert(TS21_HEATER_POWER_X10 == 50U, "The requested test ceiling is 5 W");
+_Static_assert(TS21_HEATER_SESSION_US == 3000000U, "The requested session limit is 3 seconds");
+_Static_assert(TS21_HEATER_TARGET_C == 80 && TS21_HEATER_CUTOFF_C == 90, "Keep the existing temperature limits");
+
 static void prepare_heater(void) {
   reset();
   assert(ts21_board_init());
@@ -816,7 +820,7 @@ static void test_heater_faults(void) {
   assert_heater_off();
 
   prepare_heater();
-  ticks = ((uint64_t)UINT32_MAX - 5000000U) * TS21_TIMER_TICKS_PER_US;
+  ticks = ((uint64_t)UINT32_MAX - TS21_HEATER_SESSION_US / 2U) * TS21_TIMER_TICKS_PER_US;
   sample_heater();
   setTipPWM(255, false);
   ticks += (uint64_t)TS21_HEATER_SESSION_US * TS21_TIMER_TICKS_PER_US;
@@ -828,6 +832,34 @@ static void test_heater_faults(void) {
   ts21_heater_check();
   assert(ts21_status.errors == TS21_ERROR_HEATER_TIMEOUT);
   assert(heater_failures == failures);
+}
+
+static void test_three_second_session(void) {
+  for (unsigned wrap = 0; wrap < 2; ++wrap) {
+    prepare_heater();
+    if (wrap) {
+      ticks = ((uint64_t)UINT32_MAX - 1000000U) * TS21_TIMER_TICKS_PER_US;
+    }
+    sample_heater();
+    setTipPWM(255, false);
+    assert(getTipX10Watts() == 50);
+    const uint64_t started = ticks;
+    ts21_heater_inhibit();
+    clock_running = false;
+    ticks         = started + 2999999ULL * TS21_TIMER_TICKS_PER_US;
+    ts21_heater_check();
+    assert(ts21_status.errors == 0);
+    ticks = started + 3000000ULL * TS21_TIMER_TICKS_PER_US;
+    ts21_heater_check();
+    assert(ts21_status.errors == TS21_ERROR_HEATER_TIMEOUT);
+    assert_heater_off();
+    clock_running    = true;
+    heater_permitted = true;
+    sample_heater();
+    setTipPWM(255, false);
+    assert(ts21_status.errors == TS21_ERROR_HEATER_TIMEOUT);
+    assert_heater_off();
+  }
 }
 
 static void test_passive_uart_heater(void) {
@@ -883,6 +915,7 @@ int main(void) {
 #ifdef TS21_HEATER_TEST
   test_bounded_heater();
   test_heater_faults();
+  test_three_second_session();
   test_passive_uart_heater();
   puts("TS21 heater tests passed: measured resistance, power cap, finite hardware gate, freshness, faults and session limits");
 #endif

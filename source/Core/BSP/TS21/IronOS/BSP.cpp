@@ -151,6 +151,7 @@ void     showBootLogo() {
   setSettingValue(SettingsOptions::AutoStartMode, 0);
   setSettingValue(SettingsOptions::BoostTemp, 0);
   setSettingValue(SettingsOptions::KeepAwakePulse, 0);
+  setSettingValue(SettingsOptions::PowerLimit, POWER_LIMIT);
   setSettingValue(SettingsOptions::SolderingTemp, getSettingValue(SettingsOptions::TemperatureInF) ? MAX_TEMP_F : MAX_TEMP_C);
 #endif
 }

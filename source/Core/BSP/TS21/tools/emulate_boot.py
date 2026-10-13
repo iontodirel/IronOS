@@ -33,7 +33,7 @@ parser.add_argument(
         "overtemp",
         "stall",
         "session",
-        "no-rise",
+        "pulse",
         "uart",
         "monitor",
     ),
@@ -103,6 +103,7 @@ class Board:
         self.last_watchdog = 0
         self.result = None
         self.heater_commands = 0
+        self.initial_session_us = None
         self.gate_started = None
         self.home_draws = 0
         self.button_started = None
@@ -204,6 +205,9 @@ class Board:
             defaults[0] = 176  # Saved setpoint above the first-heating C limit.
             defaults[18] = 20  # Saved power-bank keepalive must not bypass arming.
             defaults[22] = 176  # Saved boost must not bypass the test limit.
+            defaults[24] = (
+                2  # The prior image's saved 2 W limit must not hide the 5 W test.
+            )
         record = struct.pack("<HH" + "H" * count, 0x55AA, count, *defaults)
         cpu.mem_write(0x0800FC00, record.ljust(256, b"\xff"))
 
@@ -261,9 +265,16 @@ class Board:
         resistance = (self.sample_adc["probe"] - self.sample_adc["tip"]) * 10 // 177
         if (
             not 0 < compare <= 640 * 85 // 100
-            or compare * voltage * voltage > 20 * resistance * 640
+            or compare * voltage * voltage > 50 * resistance * 640
         ):
             self.stop(f"FAIL: first-heating power/duty limit exceeded: CCR1={compare}")
+            return
+        if compare != min(
+            640 * 50 * resistance // (voltage * voltage), 640 * 85 // 100
+        ):
+            self.stop(
+                f"FAIL: cold fixture did not reach the requested 5 W ceiling: CCR1={compare}"
+            )
             return
         if (
             self.button_started is None
@@ -278,13 +289,21 @@ class Board:
         if args.check_heater == "uart" and not self.status_errors() & (1 << 4):
             self.stop("FAIL: passive UART receive error was not retained for diagnosis")
             return
+        if self.initial_session_us is None:
+            self.initial_session_us = self.ram_value("heater_session_us")
+        if (
+            args.check_heater == "pulse"
+            and self.micros() - self.initial_session_us >= 3000000
+        ):
+            self.stop("FAIL: heater pulse started after the three-second allowance")
+            return
         self.heater_commands += 1
         print(
             f"{self.micros():8d} us heater command {self.heater_commands}: "
             f"CCR1={compare}/640, target={self.ram_value('currentTempTargetDegC')} C",
             flush=True,
         )
-        if self.heater_commands == 3:
+        if self.heater_commands == 3 and args.check_heater != "pulse":
             self.injected = True
             if args.check_heater in ("short", "uart"):
                 self.probe_delta = 0
@@ -296,11 +315,10 @@ class Board:
                 self.tip_adc = 1100
             elif args.check_heater == "monitor":
                 cpu.mem_write(symbols["heaterThermalRunawayCounter"], b"\xff")
-            elif args.check_heater in ("session", "no-rise"):
-                age = 10000000 if args.check_heater == "session" else 5000000
+            elif args.check_heater == "session":
                 cpu.mem_write(
                     symbols["heater_session_us"],
-                    struct.pack("<I", (self.micros() - age) & 0xFFFFFFFF),
+                    struct.pack("<I", (self.micros() - 3000000) & 0xFFFFFFFF),
                 )
             elif args.check_heater == "stall":
                 self.stall_requested = True
@@ -381,7 +399,7 @@ class Board:
                 "supply": 1 << 14,
                 "overtemp": 1 << 12,
                 "session": 1 << 11,
-                "no-rise": 1 << 13,
+                "pulse": 1 << 11,
                 "uart": 1 << 9,
                 "monitor": 1 << 16,
             }
@@ -417,6 +435,28 @@ class Board:
     def code(self, uc, pc, size, unused):
         self.steps += 1
         self.recent.append(pc)
+        if (
+            args.check_heater == "pulse"
+            and not self.injected
+            and pc == symbols["ts21_heater_trip"]
+        ):
+            elapsed = (
+                self.micros() - self.initial_session_us
+                if self.initial_session_us is not None
+                else 0
+            )
+            if (
+                uc.reg_read(UC_RISCV_REG_X0 + 10) != 1 << 11
+                or not 3000000 <= elapsed < 3002000
+                or self.heater_commands < 20
+            ):
+                self.stop(f"FAIL: unexpected full-pulse stop after {elapsed} us")
+                return
+            self.injected = True
+            print(
+                f"Three-second test stopped after {elapsed} us without advancing its timestamp",
+                flush=True,
+            )
         if args.check_heater and self.fault_stage == "home":
             if pc == symbols.get("isTipDisconnected"):
                 self.disconnect_return = uc.reg_read(UC_RISCV_REG_X0 + 1)

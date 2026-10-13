@@ -36,10 +36,10 @@ extern "C" {
 #ifndef TS21_IRONOS
 #error "The standalone TS21 diagnostic must never enable heating"
 #endif
-#define TS21_HEATER_POWER_X10     20U
+#define TS21_HEATER_POWER_X10     50U
 #define TS21_HEATER_TARGET_C      80
 #define TS21_HEATER_CUTOFF_C      90
-#define TS21_HEATER_SESSION_US    UINT32_C(10000000)
+#define TS21_HEATER_SESSION_US    UINT32_C(3000000)
 #define TS21_HEATER_FRESH_US      UINT32_C(20000)
 #define TS21_HEATER_COMMAND_US    UINT32_C(150000)
 #define TS21_HEATER_WINDOW_MS     120U

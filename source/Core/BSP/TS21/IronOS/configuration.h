@@ -71,8 +71,8 @@
 #define MIN_CALIBRATION_OFFSET       0
 #define PID_POWER_LIMIT              0
 #ifdef TS21_HEATER_TEST
-#define POWER_LIMIT              2
-#define MAX_POWER_LIMIT          2
+#define POWER_LIMIT              (TS21_HEATER_POWER_X10 / 10U)
+#define MAX_POWER_LIMIT          POWER_LIMIT
 #define HARDWARE_MAX_WATTAGE_X10 TS21_HEATER_POWER_X10
 #define MAX_TEMP_C               TS21_HEATER_TARGET_C
 #define MAX_TEMP_F               176
