@@ -37,8 +37,8 @@ extern "C" {
 #error "The standalone TS21 diagnostic must never enable heating"
 #endif
 #define TS21_HEATER_POWER_X10     50
-#define TS21_HEATER_TARGET_C      90
-#define TS21_HEATER_CUTOFF_C      100
+#define TS21_DEFAULT_TEMP_C       320
+#define TS21_HEATER_CUTOFF_C      500
 #define TS21_HEATER_RISE_US       UINT32_C(20000000)
 #define TS21_HEATER_RISE_C        3
 #define TS21_HEATER_FRESH_US      UINT32_C(20000)

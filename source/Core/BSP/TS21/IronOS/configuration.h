@@ -28,7 +28,7 @@
 #define ADC_MAX_READING              4096
 #define PID_TIM_HZ                   8
 #ifdef TS21_HEATER_TEST
-#define SOLDERING_TEMP TS21_HEATER_TARGET_C
+#define SOLDERING_TEMP TS21_DEFAULT_TEMP_C
 #define BOOST_TEMP     0
 #else
 #define SOLDERING_TEMP               320
@@ -75,19 +75,15 @@
 #define POWER_LIMIT              (TS21_HEATER_POWER_X10 / 10U)
 #define MAX_POWER_LIMIT          POWER_LIMIT
 #define HARDWARE_MAX_WATTAGE_X10 TS21_HEATER_POWER_X10
-#define MAX_TEMP_C               TS21_HEATER_CUTOFF_C
-#define MAX_TEMP_F               212
-#define MIN_BOOST_TEMP_C         50
-#define MIN_BOOST_TEMP_F         122
 #else
 #define POWER_LIMIT                  0
 #define MAX_POWER_LIMIT              0
 #define HARDWARE_MAX_WATTAGE_X10     0
+#endif
 #define MAX_TEMP_C                   450
 #define MAX_TEMP_F                   850
 #define MIN_BOOST_TEMP_C             250
 #define MIN_BOOST_TEMP_F             480
-#endif
 #define POWER_LIMIT_STEPS            1
 #define ENFORCE_HARDWARE_MAX_WATTAGE 1
 #define MIN_TEMP_C                   10

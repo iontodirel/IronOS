@@ -46,10 +46,11 @@ to exit. Do not lower resistance limits or bypass invalid samples to force
 the soldering screen open.
 
 On each boot it starts unarmed at the normal home screen. Saved autostart,
-boost and power-bank keepalive are overridden in RAM, and the setpoint is
-initialized to **90 C (194 F)** for margin below the **100 C (212 F) ceiling**.
-Temperature selection is limited to that ceiling in either unit, and the
-driver latches off at an indicated 100 C independently of controller demand.
+boost and power-bank keepalive are overridden in RAM. The saved soldering
+temperature is preserved rather than forced back to the earlier 90 C test
+setpoint. The usual **10..450 C / 50..850 F** controls are available; the
+factory default is **320 C**. The experimental 100 C ceiling is removed,
+not the normal setpoint limits or fault protections.
 The power-limit setting is initialized to 5 W in RAM,
 including when the previous build saved a 2 W limit; it can still be reduced
 in settings but cannot raise the driver's ceiling.
@@ -82,7 +83,8 @@ This image accepts measured resistance from 1.0 through 10.0 ohms and input
 voltage from 4.5 through 21.0 V; these are conservative test acceptance bounds,
 not claimed cartridge specifications. Short/open resistance, invalid sensors,
 invalid supply, handle temperature outside 0..60 C and tip temperature at or
-above **100 C** inhibit output. Faults latch until reboot.
+above **500 C** inhibit output. This is a separate sensor-range/overtemperature
+fault threshold above the normal operating setpoints. Faults latch until reboot.
 There is **no fixed three- or five-second heating-session cutoff**. Normal
 temperature control continues until the user exits or a protection acts.
 The board still requires at least 3 C progress within a 20-second window when
@@ -90,12 +92,16 @@ heating is armed and the tip is at least 3 C below the target, matching the
 S60/S60P rise-check interval and threshold. Progress restarts this watchdog;
 being near the target or idle resets it. It remains active after warm-up, so a
 later stuck reading is not excused by an earlier successful rise.
+The rise check uses the same effective Celsius target as the shared controller:
+the 850 F selection converts to 454 C, but the controller limits it to 450 C.
+That normal conversion must not produce a false no-rise fault at 450 C.
+At only 5 W, higher setpoints may be slow or unreachable; do not bypass a
+protection trip to compensate for insufficient power.
 
-**The 100 C cutoff is an indicated-temperature limit, not an absolute physical
-temperature guarantee.** Calibration error, thermal overshoot, or a failed
-power device can defeat that interpretation. Use an independent thermometer;
-an unconditional physical limit needs independent hardware protection.
-Previous timed-test artifacts remain separate and unchanged.
+These are sensor-based controls, not unconditional physical temperature
+guarantees. Calibration error, thermal overshoot or a failed power device
+requires independent measurement and protection. Previous 100 C and timed-test
+artifacts remain separate and unchanged.
 The normal warning screen now says **Heating stopped** and shows an eight-digit
 hexadecimal stop code. It stays visible until a button acknowledges it, even
 if the last button press was more than five seconds ago. Acknowledging it does
@@ -163,7 +169,8 @@ controller's output. The native tests cover all duty/mode combinations, raw
 power ceilings, sample consumption/age, GPIO/timer sequencing, invalid sensors,
 open/short resistance, supply/temperature bounds, command expiry, recurring
 no-rise protection and continued near-target operation across microsecond
-rollover. The 99/100 C boundary is checked explicitly. Power history uses the accepted
+rollover. Normal-temperature operation and the 499/500 C fault boundary are
+checked explicitly. Power history uses the accepted
 timer duty's raw-ADC-based power estimate, rather than a second lossy conversion
 through eight-bit PWM or reporting rejected requests as delivered power.
 
@@ -177,10 +184,11 @@ python3 source/Core/BSP/TS21/tools/emulate_boot.py \
   --check-heater short --instructions 160000000
 ```
 
-Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `continuous`,
+Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `continuous`, `range`,
 `no-rise`, `uart` and `monitor`, and
 exercise both interrupt-inherited and reset-context entry. It seeds saved
-autostart/boost/keepalive and the previous 2 W power setting, verifies unarmed startup, presses/releases the real
+autostart/boost/keepalive, a saved normal-range setpoint and the previous 2 W power
+setting, verifies unarmed startup, presses/releases the real
 bottom GPIO input, and requires bounded nonzero output before fault injection.
 The cold fixture must reach the new 5 W ceiling rather than merely producing
 some output.
@@ -197,9 +205,14 @@ output normally. Native checks cover all four UART receive-error flags and
 ensure every other error bit still inhibits output, including when combined
 with a UART error.
 The `no-rise` run ages only the rise-watchdog timestamp for a fault check.
+The `range` run verifies that a saved 320 C or 850 F selection is retained,
+can heat above the old 100 C ceiling within 5 W, and does not trigger the
+rise watchdog at its effective target. It then checks the 500 C fault cutoff.
+Use `--check-heater range --instructions 200000000`, with `--fahrenheit` for
+the upper Fahrenheit setting.
 The `continuous` run uses a scripted temperature rise, verifies controller
 modulation and continued operation beyond six seconds, then injects the exact
-100 C reading and checks shutdown and restart lockout. Use
+500 C reading and checks shutdown and restart lockout. Use
 `--check-heater continuous --instructions 600000000` for its longer budget;
 `--fahrenheit` also exercises saved Fahrenheit settings. Native tests exercise
 continued operation for over a minute, renewed rise demand, counter rollover,

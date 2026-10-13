@@ -249,7 +249,7 @@ static void reset(void) {
   adc_value                 = 0xFABC;
 #ifdef TS21_HEATER_TEST
   heater_permitted = use_adc_fixture = false;
-  heater_target_c                    = TS21_HEATER_TARGET_C;
+  heater_target_c                    = TS21_DEFAULT_TEMP_C;
   heater_failures                    = 0;
   gate_started_ticks                 = 0;
 #endif
@@ -614,7 +614,7 @@ static void test_sensor_conversion(void) {
 #ifdef TS21_HEATER_TEST
 _Static_assert(TS21_HEATER_POWER_X10 == 50U, "The requested test ceiling is 5 W");
 _Static_assert(TS21_HEATER_RISE_US == 20000000U, "Use the C210 twenty-second rise-fault interval");
-_Static_assert(TS21_HEATER_TARGET_C == 90 && TS21_HEATER_CUTOFF_C == 100, "Keep margin below the 100 C indicated ceiling");
+_Static_assert(TS21_DEFAULT_TEMP_C == 320 && TS21_HEATER_CUTOFF_C == 500, "Use normal setpoints with a separate overtemperature fault threshold");
 
 static void prepare_heater(void) {
   reset();
@@ -708,14 +708,24 @@ static void test_heater_faults(void) {
   assert_heater_off();
 
   prepare_heater();
-  adc_fixture.tip       = 958; // 99 C with the fixture's 25 C handle.
-  adc_fixture.tip_probe = 1312;
+  adc_fixture.tip       = 961; // 100 C must no longer act as a test cutoff.
+  adc_fixture.tip_probe = 1315;
   sample_heater();
   setTipPWM(255, false);
   assert(ts21_status.errors == 0);
   assert(getTipX10Watts() == 50);
-  adc_fixture.tip       = 963; // Exactly 100 C.
-  adc_fixture.tip_probe = 1317;
+  adc_fixture.tip       = 2180; // 320 C.
+  adc_fixture.tip_probe = 2534;
+  sample_heater();
+  setTipPWM(255, false);
+  assert(ts21_status.errors == 0 && getTipX10Watts() == 50);
+  adc_fixture.tip       = 3321; // 499 C.
+  adc_fixture.tip_probe = 3675;
+  sample_heater();
+  setTipPWM(255, false);
+  assert(ts21_status.errors == 0 && getTipX10Watts() == 50);
+  adc_fixture.tip       = 3328; // Exactly 500 C.
+  adc_fixture.tip_probe = 3682;
   sample_heater();
   assert(ts21_status.errors == TS21_ERROR_HEATER_TEMP);
   assert_heater_off();
@@ -779,7 +789,7 @@ static void test_heater_faults(void) {
       { .tip_probe = 934,  .tip = 580, .handle = 2864,  .input = 500},
       { .tip_probe = 934,  .tip = 580, .handle = 2864, .input = 3500},
       { .tip_probe = 934,  .tip = 580,    .handle = 0,  .input = 725},
-      {.tip_probe = 1434, .tip = 1080, .handle = 2864,  .input = 725},
+      {.tip_probe = 3682, .tip = 3328, .handle = 2864,  .input = 725},
       { .tip_probe = 934,  .tip = 580,  .handle = 500,  .input = 725},
   };
   const uint32_t errors[] = {TS21_ERROR_HEATER_SHORT, TS21_ERROR_HEATER_OPEN, TS21_ERROR_HEATER_SUPPLY, TS21_ERROR_HEATER_SUPPLY, TS21_ERROR_SENSOR, TS21_ERROR_HEATER_TEMP, TS21_ERROR_HEATER_TEMP};
@@ -831,6 +841,7 @@ static void test_heater_faults(void) {
 static void test_continuous_temperature_control(void) {
   for (unsigned wrap = 0; wrap < 2; ++wrap) {
     prepare_heater();
+    heater_target_c = 90;
     if (wrap) {
       ticks = ((uint64_t)UINT32_MAX - 1000000U) * TS21_TIMER_TICKS_PER_US;
     }
@@ -925,7 +936,7 @@ int main(void) {
   test_heater_faults();
   test_continuous_temperature_control();
   test_passive_uart_heater();
-  puts("TS21 heater tests passed: power cap, finite gate, freshness, 100 C cutoff, continuous operation and rise watchdog");
+  puts("TS21 heater tests passed: 5 W cap, finite gate, normal temperatures, overtemperature cutoff and rise watchdog");
 #endif
   puts("TS21 host tests passed: protocol, inhibit ordering, button mapping, clocks, ADC, UART, I2C and bounded failures");
   return 0;

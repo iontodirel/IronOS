@@ -35,6 +35,7 @@ parser.add_argument(
         "stall",
         "no-rise",
         "continuous",
+        "range",
         "uart",
         "monitor",
     ),
@@ -106,6 +107,10 @@ class Board:
         self.heater_commands = 0
         self.first_heater_us = None
         self.modulation_seen = False
+        self.expected_target = 454 if args.fahrenheit else 320
+        self.control_target = min(self.expected_target, 450)
+        self.target_tip_adc = 2992 if args.fahrenheit else 2180
+        self.range_started = None
         self.gate_started = None
         self.home_draws = 0
         self.button_started = None
@@ -204,7 +209,7 @@ class Board:
         defaults[7] = 7  # Nonzero saved motion sensitivity, despite no motion driver.
         defaults[10] = 1  # Enter the real soldering UI through normal autostart.
         if args.check_heater:
-            defaults[0] = 176  # Saved setpoint above the first-heating C limit.
+            defaults[0] = 850 if args.fahrenheit else 320
             defaults[15] = int(args.fahrenheit)
             defaults[18] = 20  # Saved power-bank keepalive must not bypass arming.
             defaults[22] = 176  # Saved boost must not bypass the test limit.
@@ -273,7 +278,9 @@ class Board:
             self.stop(f"FAIL: first-heating power/duty limit exceeded: CCR1={compare}")
             return
         maximum = min(640 * 50 * resistance // (voltage * voltage), 640 * 85 // 100)
-        if args.check_heater != "continuous" and compare != maximum:
+        if (
+            args.check_heater not in ("continuous", "range") or self.heater_commands < 3
+        ) and compare != maximum:
             self.stop(
                 f"FAIL: cold fixture did not reach the requested 5 W ceiling: CCR1={compare}"
             )
@@ -282,7 +289,7 @@ class Board:
         if (
             self.button_started is None
             or self.ram_value("currentOperatingMode", 1) != 1
-            or self.ram_value("currentTempTargetDegC") != 90
+            or self.ram_value("currentTempTargetDegC") != self.expected_target
         ):
             self.stop("FAIL: heating was not manually started with a bounded target")
             return
@@ -300,7 +307,19 @@ class Board:
             f"CCR1={compare}/640, target={self.ram_value('currentTempTargetDegC')} C",
             flush=True,
         )
-        if self.heater_commands == 3 and args.check_heater != "continuous":
+        if self.heater_commands == 3 and args.check_heater == "range":
+            self.range_started = self.micros()
+            self.tip_adc = self.target_tip_adc
+            cpu.mem_write(symbols["heater_rise_tracking"], b"\x01")
+            cpu.mem_write(
+                symbols["heater_rise_temperature"],
+                struct.pack("<h", self.control_target),
+            )
+            cpu.mem_write(
+                symbols["heater_rise_us"],
+                struct.pack("<I", (self.micros() - 20000000) & 0xFFFFFFFF),
+            )
+        elif self.heater_commands == 3 and args.check_heater != "continuous":
             self.injected = True
             if args.check_heater in ("short", "uart"):
                 self.probe_delta = 0
@@ -309,7 +328,9 @@ class Board:
             elif args.check_heater == "supply":
                 self.input_adc = 0
             elif args.check_heater == "overtemp":
-                self.tip_adc = 963  # Exactly 100 C with the fixture handle temperature.
+                self.tip_adc = (
+                    3328  # Exactly 500 C with the fixture handle temperature.
+                )
             elif args.check_heater == "monitor":
                 cpu.mem_write(symbols["heaterThermalRunawayCounter"], b"\xff")
             elif args.check_heater == "no-rise":
@@ -361,7 +382,7 @@ class Board:
                 mode != 1
                 or self.status_errors()
                 or not self.modulation_seen
-                or self.ram_value("currentTempTargetDegC") != 90
+                or self.ram_value("currentTempTargetDegC") != self.expected_target
                 or not self.ram_value("heaterArmed", 1)
                 or self.gate_high()
                 or self.registers.get(0x40000400, 0) & 1
@@ -371,9 +392,32 @@ class Board:
                 )
                 return
             self.injected = True
-            self.tip_adc = 963
+            self.tip_adc = 3328
             print(
-                "Continuous control held the 90 C fixture; checking the exact 100 C cutoff",
+                "Continuous normal-range control held the target; checking the 500 C fault cutoff",
+                flush=True,
+            )
+        if (
+            args.check_heater == "range"
+            and self.range_started is not None
+            and not self.injected
+            and self.micros() - self.range_started >= 300000
+        ):
+            if (
+                mode != 1
+                or self.status_errors()
+                or self.ram_value("currentTempTargetDegC") != self.expected_target
+                or self.sample_adc["tip"] != self.target_tip_adc
+                or not self.ram_value("heaterArmed", 1)
+            ):
+                self.stop(
+                    "FAIL: saved normal-range setpoint or at-target rise supervision is incorrect"
+                )
+                return
+            self.injected = True
+            self.tip_adc = 3328
+            print(
+                "Saved temperature retained above 100 C with no false rise fault; checking 500 C shutdown",
                 flush=True,
             )
         if self.injected and mode == 0:
@@ -422,6 +466,7 @@ class Board:
                 "overtemp": 1 << 12,
                 "no-rise": 1 << 13,
                 "continuous": 1 << 12,
+                "range": 1 << 12,
                 "uart": 1 << 9,
                 "monitor": 1 << 16,
             }
@@ -694,7 +739,8 @@ class Board:
                 and not self.injected
             ):
                 elapsed = self.micros() - self.first_heater_us
-                self.tip_adc = 580 + min(329, 329 * elapsed // 2000000)
+                delta = self.target_tip_adc - 580
+                self.tip_adc = 580 + min(delta, delta * elapsed // 2000000)
             tip = self.tip_adc + (self.probe_delta if self.gpio[0x40010800] & 1 else 0)
             self.registers[0x4001244C] = {
                 1: tip,

@@ -29,7 +29,11 @@ bool ts21_heater_permitted(void) {
          (uint32_t)(ts21_micros() - lastGUIRead) < 500000U;
 }
 
-bool ts21_heater_needs_rise(int16_t temperature) { return currentTempTargetDegC - temperature >= TS21_HEATER_RISE_C; }
+bool ts21_heater_needs_rise(int16_t temperature) {
+  // Match the shared controller's Celsius clamp, including the 850 F setting.
+  const TemperatureType_t target = currentTempTargetDegC;
+  return (target > MAX_TEMP_C ? MAX_TEMP_C : target) - temperature >= TS21_HEATER_RISE_C;
+}
 
 void ts21_heater_failed(void) {
   heaterArmed                 = false;
@@ -150,12 +154,11 @@ void     unstick_I2C() { ts21_fault(TS21_ERROR_I2C_BUS); }
 void     showBootLogoIfavailable() {}
 void     showBootLogo() {
 #ifdef TS21_HEATER_TEST
-  // Apply the first-heating limits before the GUI examines saved autostart/boost settings.
+  // Keep the experimental heater manual-start and power-limited.
   setSettingValue(SettingsOptions::AutoStartMode, 0);
   setSettingValue(SettingsOptions::BoostTemp, 0);
   setSettingValue(SettingsOptions::KeepAwakePulse, 0);
   setSettingValue(SettingsOptions::PowerLimit, POWER_LIMIT);
-  setSettingValue(SettingsOptions::SolderingTemp, getSettingValue(SettingsOptions::TemperatureInF) ? (TS21_HEATER_TARGET_C * 9 / 5 + 32) : TS21_HEATER_TARGET_C);
 #endif
 }
 bool     getHallSensorFitted() { return false; }
