@@ -78,6 +78,8 @@ def filter_translation(lang: dict, defs: dict, macros: frozenset):
 
     for category in ("menuOptions", "menuGroups", "menuValues"):
         for _, record in enumerate(defs[category]):
+            if "default" in record:
+                lang[category].setdefault(record["id"], record["default"].copy())
             if check_excluded(record):
                 lang[category][record["id"]]["displayText"] = ""
                 lang[category][record["id"]]["description"] = ""

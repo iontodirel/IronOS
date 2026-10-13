@@ -50,6 +50,10 @@ static void gpio_mode(uint32_t port, unsigned pin, uint32_t mode) {
   modify(port + (pin < 8 ? 0U : 4U), UINT32_C(15) << shift, mode << shift);
 }
 
+#ifdef TS21_IRONOS
+void setWorklight(bool enabled) { ts21_mmio_write(TS21_GPIOA + (enabled ? 0x10U : 0x14U), TS21_WORKLIGHT); }
+#endif
+
 static bool wait_bits(uint32_t address, uint32_t mask, uint32_t expected) {
   for (unsigned remaining = 100000; remaining; --remaining) {
     if ((ts21_mmio_read(address) & mask) == expected) {
@@ -536,6 +540,10 @@ bool ts21_board_init(void) {
   uart_ready = false;
   adc_ready  = false;
   ts21_heater_inhibit();
+#ifdef TS21_IRONOS
+  setWorklight(false);
+  gpio_mode(TS21_GPIOA, 9, 3);
+#endif
 #ifdef TS21_HEATER_TEST
   heater_rise_tracking   = false;
   heater_sample_error    = TS21_ERROR_SENSOR;

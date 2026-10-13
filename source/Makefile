@@ -560,9 +560,12 @@ endif
 %.dfu: %.bin Makefile
 	$(HOST_PYTHON) dfuse-pack.py -b $(DEVICE_DFU_ADDRESS)@0:$< -D $(DEVICE_DFU_VID_PID) $@
 
+# TS21 needs both existing lossless compression formats within its fixed flash region.
+SINGLE_LANGUAGE_TRANSLATION := $(if $(filter TS21,$(model)),Translation_brieflz_font,Translation)
+
 $(HEXFILE_DIR)/$(model)_%.elf: \
 		$(OUT_OBJS_S) $(OUT_OBJS) $(OUT_OBJS_CPP)    \
-		$(OUTPUT_DIR)/Core/Gen/Translation.%.o       \
+		$(OUTPUT_DIR)/Core/Gen/$(SINGLE_LANGUAGE_TRANSLATION).%.o \
 		$(OUTPUT_DIR)/Core/LangSupport/lang_single.o \
 		$(OUTPUT_DIR)/Core/Gen/settings_gen.$(model).o \
 		Makefile $(LDSCRIPT)
@@ -570,7 +573,7 @@ $(HEXFILE_DIR)/$(model)_%.elf: \
 	@echo Linking $@
 	@$(CPP) $(CXXFLAGS) $(OUT_OBJS_S) $(OUT_OBJS) $(OUT_OBJS_CPP) \
         $(OUTPUT_DIR)/Core/Gen/settings_gen.$(model).o \
-		$(OUTPUT_DIR)/Core/Gen/Translation.$*.o      \
+		$(OUTPUT_DIR)/Core/Gen/$(SINGLE_LANGUAGE_TRANSLATION).$*.o \
 		$(OUTPUT_DIR)/Core/LangSupport/lang_single.o \
 		$(LIBS) $(LINKER_FLAGS) -o$@ -Wl,-Map=$@.map
 
@@ -673,14 +676,15 @@ Core/Gen/Translation_brieflz.%.cpp: $(OUTPUT_DIR)/Core/Gen/translation.files/%.o
 		--strings-obj "$(OUTPUT_DIR)/Core/Gen/translation.files/$*.o"        \
 		$*
 
-Core/Gen/Translation_brieflz_font.%.cpp: $(OUTPUT_DIR)/Core/Gen/translation.files/%.pickle $(HOST_OUTPUT_DIR)/brieflz/libbrieflz.so Core/Gen/macros.txt
+Core/Gen/Translation_brieflz_font.%.cpp: $(OUTPUT_DIR)/Core/Gen/translation.files/%.pickle $(HOST_OUTPUT_DIR)/brieflz/libbrieflz.so Core/Gen/macros.txt $(if $(filter TS21,$(model)),$(OUTPUT_DIR)/Core/Gen/translation.files/%.o)
 	@test -d $(@D) || mkdir -p $(@D)
 	@echo Generating BriefLZ compressed translation font for $*
-	@$(HOST_PYTHON) ../Translations/make_translation.py        \
+	@OBJCOPY=$(OBJCOPY) $(HOST_PYTHON) ../Translations/make_translation.py \
 		--macros "$(CURDIR)/Core/Gen/macros.txt"                \
 		-o "$(CURDIR)/Core/Gen/Translation_brieflz_font.$*.cpp" \
 		--input-pickled $(OUTPUT_DIR)/Core/Gen/translation.files/$*.pickle \
 		--compress-font \
+		$(if $(filter TS21,$(model)),--strings-obj "$(OUTPUT_DIR)/Core/Gen/translation.files/$*.o") \
 		$*
 
 # The recipes to produce multi-language firmwares:

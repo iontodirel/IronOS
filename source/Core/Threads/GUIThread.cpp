@@ -160,6 +160,9 @@ OperatingMode guiHandleDraw(void) {
 #endif
     break;
   };
+#ifdef WORKLIGHT_SETTING
+  setWorklight(getSettingValue(SettingsOptions::WorklightEnabled));
+#endif
   return newMode;
 }
 void guiRenderLoop(void) {

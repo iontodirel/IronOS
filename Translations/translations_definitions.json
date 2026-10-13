@@ -618,6 +618,17 @@
       "maxLen2": 13,
       "include": ["BUZZER_SETTING"],
       "description": "Enable the buzzer: short beep when the set temperature is reached and at the end of a profile."
+    },
+    {
+      "id": "WorklightEnabled",
+      "maxLen": 6,
+      "maxLen2": 13,
+      "include": ["WORKLIGHT_SETTING"],
+      "description": "Switch the front work light on or off.",
+      "default": {
+        "displayText": "Work\nlight",
+        "description": "Front work light on/off"
+      }
     }
   ]
 }

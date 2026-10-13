@@ -638,6 +638,33 @@ static void assert_heater_off(void) {
   assert(getTipX10Watts() == 0);
 }
 
+static void test_worklight_during_heating(void) {
+  prepare_heater();
+  setWorklight(true);
+  sample_heater();
+  setTipPWM(255, false);
+  ticks += 1000U * TS21_TIMER_TICKS_PER_US;
+  assert(gate_high());
+  const uint32_t timer1        = *reg(TS21_TIM1);
+  const uint32_t timer3        = *reg(TS21_TIM3);
+  const uint32_t compare       = *reg(TS21_TIM3 + 0x34);
+  const uint32_t configuration = *reg(TS21_GPIOA + 4);
+  setWorklight(false);
+  assert(!(*reg(TS21_GPIOA + 12) & TS21_WORKLIGHT));
+  assert(gate_high() && getTipX10Watts() > 0);
+  setWorklight(true);
+  assert(*reg(TS21_GPIOA + 12) & TS21_WORKLIGHT);
+  assert(*reg(TS21_TIM1) == timer1 && *reg(TS21_TIM3) == timer3);
+  assert(*reg(TS21_TIM3 + 0x34) == compare);
+  assert(*reg(TS21_GPIOA + 4) == configuration);
+  sample_heater();
+  assert(*reg(TS21_GPIOA + 12) & TS21_WORKLIGHT);
+  assert((*reg(TS21_GPIOA + 4) >> 4 & 15) == 3);
+  ts21_heater_inhibit();
+  assert_heater_off();
+  assert(*reg(TS21_GPIOA + 12) & TS21_WORKLIGHT);
+}
+
 static void test_bounded_heater(void) {
   for (unsigned fast = 0; fast < 2; ++fast) {
     for (unsigned pulse = 0; pulse < 256; ++pulse) {
@@ -938,6 +965,29 @@ static void test_passive_uart_heater(void) {
 }
 #endif
 
+#ifdef TS21_IRONOS
+static void test_worklight_gpio(void) {
+  _Static_assert(TS21_WORKLIGHT == (1U << 9), "Stock work light is PA9");
+  _Static_assert(!(TS21_WORKLIGHT & (TS21_HEATER_IN | TS21_HEATER_EN)), "Work light must be separate from the heater");
+  reset();
+  assert(ts21_board_init());
+  assert(!(*reg(TS21_GPIOA + 12) & TS21_WORKLIGHT));
+  assert((*reg(TS21_GPIOA + 4) >> 4 & 15) == 3);
+  const uint32_t output        = *reg(TS21_GPIOA + 12);
+  const uint32_t port_b        = *reg(TS21_GPIOB + 12);
+  const uint32_t configuration = *reg(TS21_GPIOA + 4);
+  write_count                  = 0;
+  setWorklight(true);
+  assert(write_count == 1 && writes[0].address == TS21_GPIOA + 0x10 && writes[0].value == TS21_WORKLIGHT);
+  assert(*reg(TS21_GPIOA + 12) == (output | TS21_WORKLIGHT));
+  setWorklight(false);
+  assert(write_count == 2 && writes[1].address == TS21_GPIOA + 0x14 && writes[1].value == TS21_WORKLIGHT);
+  assert(*reg(TS21_GPIOA + 12) == output);
+  assert(*reg(TS21_GPIOB + 12) == port_b);
+  assert(*reg(TS21_GPIOA + 4) == configuration);
+}
+#endif
+
 int main(void) {
   test_protocol();
   test_startup_and_inputs();
@@ -949,7 +999,11 @@ int main(void) {
   test_sensor_sequence();
   test_sensor_conversion();
   test_all_pwm_requests_inhibited();
+#ifdef TS21_IRONOS
+  test_worklight_gpio();
+#endif
 #ifdef TS21_HEATER_TEST
+  test_worklight_during_heating();
   test_bounded_heater();
   test_heater_faults();
   test_continuous_temperature_control();

@@ -361,6 +361,10 @@
     "BuzzerEnabled": {
       "displayText": "Buzzer",
       "description": "Beep when the set temperature is reached and at the end of a profile"
+    },
+    "WorklightEnabled": {
+      "displayText": "Work\nlight",
+      "description": "Front work light on/off"
     }
   }
 }

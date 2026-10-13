@@ -115,6 +115,9 @@ enum StatusLED {
 void setStatusLED(const enum StatusLED state);
 
 void setBuzzer(bool on);
+#ifdef WORKLIGHT_SETTING
+void setWorklight(bool enabled);
+#endif
 
 // preStartChecks are run until they return 0
 // By the PID, after each ADC sample comes in

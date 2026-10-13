@@ -24,6 +24,7 @@ parser.add_argument("--instructions", type=int, default=40000000)
 parser.add_argument("--max-frame-us", type=int)
 parser.add_argument("--check-cold-display", action="store_true")
 parser.add_argument("--fahrenheit", action="store_true")
+parser.add_argument("--check-worklight", choices=("off", "on", "menu"))
 parser.add_argument(
     "--check-heater",
     choices=(
@@ -43,6 +44,8 @@ parser.add_argument(
 args = parser.parse_args()
 if args.check_cold_display and args.check_heater:
     parser.error("Use separate runs for cold-display and heater checks")
+if args.check_worklight and (args.check_cold_display or args.check_heater):
+    parser.error("Use a separate run for work-light checks")
 
 symbols = {}
 symbol_sizes = {}
@@ -125,6 +128,10 @@ class Board:
         self.probe_delta = 354
         self.input_adc = 2900
         self.sample_adc = {}
+        self.worklight_stage = "boot"
+        self.worklight_boot_frames = 0
+        self.worklight_off_pixels = None
+        self.original_settings = None
         self.expected_fonts = {}
         if "font12_out_buffer" in symbols:
             sys.path.insert(
@@ -135,7 +142,10 @@ class Board:
             for buffer, source in (
                 ("font12_out_buffer", "font_12x16_brieflz"),
                 ("font06_out_buffer", "font_06x08_brieflz"),
+                ("translation_data_out_buffer", "translation_data_brieflz"),
             ):
+                if buffer not in symbols:
+                    continue
                 self.expected_fonts[buffer] = brieflz.depack_srcsize(
                     bytes(cpu.mem_read(symbols[source], symbol_sizes[source])),
                     symbol_sizes[buffer],
@@ -201,7 +211,7 @@ class Board:
         cpu.emu_stop()
 
     def seed_cold_display_settings(self):
-        count = 57
+        count = symbol_sizes["settingsConstants"] // 8
         constants = cpu.mem_read(symbols["settingsConstants"], count * 8)
         defaults = [
             struct.unpack_from("<4H", constants, i * 8)[3] for i in range(count)
@@ -216,6 +226,14 @@ class Board:
             defaults[24] = (
                 5  # The prior 5 W setting must not hide the requested 100 W ceiling.
             )
+            defaults[57] = 1
+        if args.check_worklight:
+            defaults[0] = 350
+            defaults[10] = 0
+            defaults[57] = int(args.check_worklight == "on")
+            if args.check_worklight != "on":
+                count = 57  # Exercise migration from the previous firmware.
+                defaults = defaults[:count]
         record = struct.pack("<HH" + "H" * count, 0x55AA, count, *defaults)
         cpu.mem_write(0x0800FC00, record.ljust(256, b"\xff"))
 
@@ -224,6 +242,138 @@ class Board:
 
     def status_errors(self):
         return int.from_bytes(cpu.mem_read(symbols["ts21_status"] + 4, 4), "little")
+
+    def worklight_value(self):
+        return int.from_bytes(
+            cpu.mem_read(symbols["systemSettings"] + 4 + 57 * 2, 2), "little"
+        )
+
+    def worklight_press(self, mask):
+        self.button_mask = mask
+        self.button_started = self.micros()
+
+    def worklight_checkbox(self):
+        return b"".join(
+            self.latest_frame[page * 128 + 114 : page * 128 + 126] for page in (1, 2)
+        )
+
+    def seek_worklight_menu(self):
+        # Select the real menu descriptor directly; subsequent toggles/exit use GPIO buttons.
+        context_size = symbol_sizes["context"]
+        if context_size not in (28, 32):
+            raise ValueError("Unexpected guiContext ABI")
+        menu = bytes(cpu.mem_read(symbols["UIMenu"], symbol_sizes["UIMenu"]))
+        entries = []
+        for stride in (20, 28):
+            if len(menu) % stride == 0:
+                entries.extend(
+                    offset // stride
+                    for offset in range(0, len(menu), stride)
+                    if menu[offset + 16] == 57
+                )
+        submenus = bytes(
+            cpu.mem_read(symbols["subSettingsMenus"], symbol_sizes["subSettingsMenus"])
+        )
+        roots = [
+            offset // 4
+            for offset in range(0, len(submenus), 4)
+            if struct.unpack_from("<I", submenus, offset)[0] == symbols["UIMenu"]
+        ]
+        if len(entries) != 1 or len(roots) != 1:
+            raise ValueError(
+                "The work-light setting is not present exactly once in User interface"
+            )
+        context = bytearray(context_size)
+        struct.pack_into("<I", context, 0, self.ram_value("xTickCount"))
+        struct.pack_into("<HH", context, context_size - 20, roots[0], entries[0] + 1)
+        cpu.mem_write(symbols["context"], bytes(context))
+        cpu.mem_write(
+            symbols["currentOperatingMode"],
+            (4).to_bytes(symbol_sizes["currentOperatingMode"], "little"),
+        )
+
+    def check_worklight_gui(self):
+        mode = self.ram_value("currentOperatingMode", 1)
+        if mode != self.last_heater_mode:
+            print(
+                f"{self.micros():8d} us work-light mode {mode}, stage={self.worklight_stage}",
+                flush=True,
+            )
+            self.last_heater_mode = mode
+        light = bool(self.gpio[0x40010800] & (1 << 9))
+        setting = self.worklight_value()
+        if (
+            self.status_errors()
+            or self.registers.get(0x40000400, 0) & 1
+            or self.gate_high()
+        ):
+            self.stop("FAIL: work-light interaction changed heater/fault state")
+            return
+        if self.worklight_stage == "boot" and mode == 0:
+            self.worklight_boot_frames += 1
+            if self.worklight_boot_frames < 3:
+                return
+            expected = int(args.check_worklight == "on")
+            if (
+                setting != expected
+                or light != bool(expected)
+                or (self.registers.get(0x40010804, 0) >> 4) & 15 != 3
+            ):
+                self.stop(
+                    "FAIL: work-light default/restored state or PA9 configuration is incorrect"
+                )
+                return
+            if args.check_worklight != "menu":
+                self.stop(
+                    f"PASS: work light restored {'on' if expected else 'off'}, heater remains off"
+                )
+                return
+            self.original_settings = bytes(
+                cpu.mem_read(symbols["systemSettings"] + 4, 57 * 2)
+            )
+            self.seek_worklight_menu()
+            self.worklight_stage = "ready"
+        elif self.worklight_stage == "ready":
+            self.worklight_off_pixels = self.worklight_checkbox()
+            self.worklight_press(1)
+            self.worklight_stage = "turn-on"
+        elif self.worklight_stage == "turn-on" and setting == 1 and light:
+            self.worklight_stage = "on-visible"
+        elif self.worklight_stage == "on-visible":
+            if self.worklight_checkbox() == self.worklight_off_pixels:
+                self.stop("FAIL: work-light checkbox did not change to on")
+                return
+            self.worklight_press(1)
+            self.worklight_stage = "turn-off"
+        elif self.worklight_stage == "turn-off" and setting == 0 and not light:
+            self.worklight_stage = "off-visible"
+        elif self.worklight_stage == "off-visible":
+            if self.worklight_checkbox() != self.worklight_off_pixels:
+                self.stop("FAIL: work-light checkbox did not return to off")
+                return
+            self.worklight_press(1)
+            self.worklight_stage = "enable-and-save"
+        elif self.worklight_stage == "enable-and-save" and setting == 1 and light:
+            cpu.mem_write(
+                symbols["context"] + symbol_sizes["context"] - 18, b"\x00\x00"
+            )
+            self.worklight_press(3)
+            self.worklight_stage = "saving"
+        elif self.worklight_stage == "saving" and mode == 0:
+            saved = bytes(cpu.mem_read(0x0800FC00, 124))
+            if (
+                struct.unpack_from("<HH", saved) != (0x55AA, 58)
+                or struct.unpack_from("<H", saved, 118)[0] != 1
+                or saved[4:118] != self.original_settings
+                or not light
+            ):
+                self.stop(
+                    "FAIL: work-light menu exit did not preserve and save the selected setting"
+                )
+                return
+            self.stop(
+                "PASS: work-light checkbox toggles PA9 on/off, saves on, preserves prior settings and never heats"
+            )
 
     def update_gate(self):
         if self.gate_started is None or not self.registers.get(0x40012C00, 0) & 1:
@@ -267,6 +417,12 @@ class Board:
             self.registers.get(address) != value for address, value in required.items()
         ):
             self.stop("FAIL: heater PWM or one-pulse gate configuration is incorrect")
+            return
+        if (
+            not self.gpio[0x40010800] & (1 << 9)
+            or (self.registers.get(0x40010804, 0) >> 4) & 15 != 3
+        ):
+            self.stop("FAIL: heater control changed the enabled work light")
             return
         compare = self.registers[0x40000434]
         voltage = (self.sample_adc["input"] * 69 - 88) // 1000 + 1
@@ -466,6 +622,9 @@ class Board:
                 )
                 return
         if self.injected and mode == 9:
+            if not self.gpio[0x40010800] & (1 << 9):
+                self.stop("FAIL: heater shutdown changed the saved work-light state")
+                return
             errors = {
                 "short": 1 << 9,
                 "open": 1 << 15,
@@ -529,7 +688,9 @@ class Board:
                     flush=True,
                 )
         if pc in self.trace and pc not in self.seen:
-            if (args.check_cold_display or args.check_heater) and pc == symbols["main"]:
+            if (
+                args.check_cold_display or args.check_heater or args.check_worklight
+            ) and pc == symbols["main"]:
                 self.seed_cold_display_settings()
             self.seen.add(pc)
             print(
@@ -611,6 +772,15 @@ class Board:
                 and max(self.frames_us) > args.max_frame_us
             ):
                 self.stop(f"FAIL: simulated frame exceeds {args.max_frame_us} us")
+            elif args.check_worklight:
+                if (
+                    self.worklight_stage == "boot"
+                    and self.button_started is None
+                    and self.ram_value("currentOperatingMode", 1) == 12
+                ):
+                    self.worklight_press(2)
+                if pc == symbols["guiHandleDraw()"]:
+                    self.check_worklight_gui()
             elif args.check_heater:
                 if pc == symbols["guiHandleDraw()"]:
                     self.check_heater_gui()
@@ -661,7 +831,10 @@ class Board:
                 self.button_started is not None
                 and self.micros() - self.button_started < 120000
             ):
-                result &= ~((1 << 7) if self.button_mask == 1 else (1 << 5))
+                if self.button_mask & 1:
+                    result &= ~(1 << 7)
+                if self.button_mask & 2:
+                    result &= ~(1 << 5)
         elif address == 0x40010C08:
             result = self.gpio[0x40010C00]
             if self.i2c_active and self.i2c_pulses and self.i2c_pulses % 9 == 0:
@@ -812,6 +985,11 @@ if args.check_heater:
         f"mode={board.ram_value('currentOperatingMode', 1)}, "
         f"armed={board.ram_value('heaterArmed', 1)}, "
         f"warning_draws={board.fault_draws}, gate_high={bool(board.gate_high())}",
+        flush=True,
+    )
+if args.check_worklight:
+    print(
+        f"worklight_stage={board.worklight_stage}, mode={board.ram_value('currentOperatingMode', 1)}, setting={board.worklight_value()}, PA9={bool(board.gpio[0x40010800] & (1 << 9))}",
         flush=True,
     )
 raise SystemExit(0 if board.result and board.result.startswith("PASS") else 1)

@@ -98,11 +98,20 @@ $(OUT)/pid-tests: tests/pid_tests.cpp $(ROOT)/source/Core/Threads/PIDThread.cpp 
 	$(HOST_CXX) -std=c++17 -Wall -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-D__riscv_xlen=32 -DMODEL_TS21 -DTS21_IRONOS -DTS21_HEATER_TEST $(HOST_INCLUDES) tests/pid_tests.cpp -o $@
 
-test: $(OUT)/host-tests $(OUT)/ironos-hardware-tests $(OUT)/ironos-tests $(OUT)/heater-tests $(OUT)/heater-power-tests $(OUT)/pid-tests
+$(OUT)/settings_gen.cpp: $(ROOT)/source/Settings/settings.yaml $(ROOT)/source/Settings/generate_settings.py $(ROOT)/source/Settings/settings_gen.cpp.template | $(OUT)
+	$(PYTHON) $(ROOT)/source/Settings/generate_settings.py TS21 $(ROOT)/source/Settings/settings.yaml $@
+
+$(OUT)/settings-tests: tests/settings_tests.cpp $(ROOT)/source/Core/Src/Settings.cpp $(ROOT)/source/Core/Inc/Settings.h $(OUT)/settings_gen.cpp Makefile IronOS/configuration.h | $(OUT)
+	$(HOST_CXX) -std=c++17 -Wall -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-D__riscv_xlen=32 -DMODEL_TS21 -DTS21_IRONOS -DTS21_HEATER_TEST -DCANT_DIRECT_READ_SETTINGS \
+		$(HOST_INCLUDES) tests/settings_tests.cpp $(ROOT)/source/Core/Src/Settings.cpp $(OUT)/settings_gen.cpp -o $@
+
+test: $(OUT)/host-tests $(OUT)/ironos-hardware-tests $(OUT)/ironos-tests $(OUT)/heater-tests $(OUT)/heater-power-tests $(OUT)/pid-tests $(OUT)/settings-tests
 	$(OUT)/host-tests
 	$(OUT)/ironos-hardware-tests
 	$(OUT)/ironos-tests
 	$(OUT)/heater-tests
 	$(OUT)/heater-power-tests
 	$(OUT)/pid-tests
+	$(OUT)/settings-tests
 	$(PYTHON) -m unittest discover -s tests -p '*_test.py'

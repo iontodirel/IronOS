@@ -18,6 +18,7 @@
 #endif
 #define TEMP_DIRECT_ADC 1
 #define CUSTOM_MAX_TEMP_C
+#define WORKLIGHT_SETTING 1
 #define NO_ACCEL 1
 #define NO_SLEEP_MODE
 #define OLED_128x32

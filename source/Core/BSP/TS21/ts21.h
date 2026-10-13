@@ -28,6 +28,7 @@ extern "C" {
 #define TS21_TIMER_HZ           (TS21_CLOCK_HZ / 8)
 #define TS21_TIMER_TICKS_PER_US (TS21_TIMER_HZ / 1000000)
 #define TS21_HEATER_EN (UINT32_C(1) << 10)
+#define TS21_WORKLIGHT          (UINT32_C(1) << 9)
 #define TS21_HEATER_IN (UINT32_C(1) << 6)
 #define TS21_SCL       (UINT32_C(1) << 10)
 #define TS21_SDA       (UINT32_C(1) << 11)
@@ -115,6 +116,9 @@ bool    ts21_pd_feed(struct TS21PDParser *parser, uint8_t byte, struct TS21PDFra
 
 void     ts21_heater_inhibit(void);
 void     setTipPWM(uint8_t pulse, bool fast);
+#ifdef TS21_IRONOS
+void setWorklight(bool enabled);
+#endif
 void     ts21_watchdog_refresh(void);
 bool     ts21_board_init(void);
 uint64_t ts21_timer_now(void);

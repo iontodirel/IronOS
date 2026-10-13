@@ -14,10 +14,36 @@ The image is
 `source/Hexfile/TS21-heater-test/TS21_font_compressed_EN.hex`, not
 `source/Hexfile/TS21_EN.hex`. Both root build targets force regeneration to
 avoid reusing another model/variant's generated settings or translations.
-The experimental heater build uses the existing lossless font-compression format to
-stay inside the unchanged 35 KiB application region. Both font buffers are
-decompressed before use; their pixels and the full 128x32 UI are unchanged.
-Bootloader and settings boundaries are not expanded.
+Both TS21 IronOS variants use the existing lossless font and string compression
+formats to stay inside the unchanged 35 KiB application region. The two font
+buffers and translation data are decompressed before use; their pixels, text
+and the full 128x32 UI are unchanged. Bootloader/settings boundaries and the
+2 KiB boot/IRQ stack reserve are not reduced.
+
+### Front work light
+
+**Settings -> User interface -> Work light** switches the front LED on or off.
+It defaults off, persists across power cycles and remains independent of
+heating. The GUI applies the setting after rendering, including after a
+factory reset. Existing settings are preserved when the new setting is appended;
+the standard settings-update notice may appear on the first boot. Untranslated
+optional menu text uses the declared English fallback.
+
+Stock v1.5.0 configures PA9 as a push-pull output: the initialization at
+`0x0800BE98` uses GPIOA mask `0x0601` and GPIO mode `0x10` at speed `3`.
+Its light-setting byte at offset 21 selects PA9 mask `0x0200` high or low at
+`0x08007EAC..0x08007ED8`; the set/reset helpers at `0x0800CA92` and `0x0800CAA6`
+write GPIO BSHR/BCR. This port retains that active-high polarity. It clears
+the latch before enabling the output and subsequently writes only PA9.
+PA6/PA10 heater controls, sensor pins and timers are untouched.
+
+Native checks exercise both LED states, including while the heater gate is
+active, and verify migration of all 57 previous settings plus on/off persistence
+using the real settings code. The actual-ELF `--check-worklight off` and `on`
+cases check boot state without heating. `--check-worklight menu` selects the
+real User interface descriptor, uses GPIO button presses to toggle it, checks
+the checkbox pixels and PA9 state, then verifies the saved flash record on exit.
+Use `--instructions 200000000` for the menu case.
 
 **This is a supervised bring-up image, not normal soldering firmware.** Use a
 current-limited source, a nonflammable holder and an independent temperature
@@ -232,7 +258,9 @@ modulation and continued operation beyond six seconds, then injects the exact
 continued operation for over a minute, renewed rise demand, counter rollover,
 and the actual shared controller's cold-start, idle and same-tick arithmetic.
 These are not hardware timing, energy or thermal measurements.
-Compressed font buffers are compared byte-for-byte against host decompression.
+Compressed fonts and translation buffers are compared byte-for-byte against
+host decompression. Heater runs also keep the light enabled and verify that
+sampling, PWM and fault shutdown do not change its selected state.
 This remains instruction/peripheral simulation, not electrical or thermal
 validation of a TS21.
 
