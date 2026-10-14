@@ -36,5 +36,12 @@ int main() {
   availablePower = 125;
   testTicks += 125;
   assert(getPIDResultX10Watts(450, 25) == 125);
+  availablePower       = 2000;
+  int32_t holdingPower = 0;
+  for (unsigned i = 0; i < 128; ++i) {
+    testTicks += 125;
+    holdingPower = getPIDResultX10Watts(320, 315);
+  }
+  assert(holdingPower > 0 && holdingPower < HARDWARE_MAX_WATTAGE_X10);
   puts("TS21 C210 controller tests passed: shared tuning, idle/same-tick/rollover timing and bounded output");
 }

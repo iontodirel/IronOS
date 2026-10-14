@@ -124,11 +124,19 @@ above **500 C** inhibit output. This is a separate sensor-range/overtemperature
 fault threshold above the normal operating setpoints. Faults latch until reboot.
 There is **no fixed three- or five-second heating-session cutoff**. Normal
 temperature control continues until the user exits or a protection acts.
-The board still requires at least 3 C progress within a 20-second window when
-heating is armed and the tip is at least 3 C below the target, matching the
-S60/S60P rise-check interval and threshold. Progress restarts this watchdog;
-being near the target or idle resets it. It remains active after warm-up, so a
-later stuck reading is not excused by an earlier successful rise.
+The board requires at least 3 C progress within a 20-second window while the
+tip is at least 3 C below target **and heating is at its effective power ceiling**.
+The ceiling uses the shared controller's available-power, user, supply, hardware
+and optional derating limits, converted to PWM and clamped by the driver's raw
+power and duty limits. Only an accepted full-effort command starts this window;
+progress restarts it, while partial/zero power, being near target or idle resets it.
+Full effort after warm-up starts a fresh window, so an earlier successful rise
+does not excuse a later stalled full-power heat-up.
+The shared C210 decaying integrator can legitimately hold a steady temperature
+slightly below target at partial power. The previous guard incorrectly demanded
+another 3 C rise every 20 seconds even in that state, reproducing `00002000` at a
+stable 315 C with a 320 C target. Normal partial-power holding no longer trips
+this extra guard; genuine no-response heating and the other protections remain.
 The rise check uses the same effective Celsius target as the shared controller:
 the 850 F selection converts to 454 C, but the controller limits it to 450 C.
 That normal conversion must not produce a false no-rise fault at 450 C.
@@ -150,7 +158,7 @@ another no-rise fault.
 
 | Stop code | Meaning |
 | --- | --- |
-| `00002000` | Less than 3 C progress within 20 seconds while heating is needed |
+| `00002000` | Less than 3 C progress within 20 seconds of full-effort heating below target |
 | `00000400` | Missing, consumed or stale sensor/control update |
 | `00000200` | Resistance below the short-circuit threshold |
 | `00008000` | Open/clipped or out-of-range high resistance reading |
@@ -206,7 +214,9 @@ controller's output. The native tests cover all duty/mode combinations, raw
 power ceilings, sample consumption/age, GPIO/timer sequencing, invalid sensors,
 open/short resistance, supply/temperature bounds, command expiry, recurring
 no-rise protection and continued near-target operation across microsecond
-rollover. Normal-temperature operation and the 499/500 C fault boundary are
+rollover. They also cover a minute-long partial-power hold below target, renewed
+full-effort demand, reduced user/supply ceilings and zero-power window reset.
+Normal-temperature operation and the 499/500 C fault boundary are
 checked explicitly. Power history uses the accepted
 timer duty's raw-ADC-based power estimate, rather than a second lossy conversion
 through eight-bit PWM or reporting rejected requests as delivered power.
@@ -225,7 +235,7 @@ python3 source/Core/BSP/TS21/tools/emulate_boot.py \
 ```
 
 Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `continuous`, `range`,
-`no-rise`, `uart` and `monitor`, and
+`hold`, `no-rise`, `uart` and `monitor`, and
 exercise both interrupt-inherited and reset-context entry. It seeds saved
 autostart/boost/keepalive, a saved normal-range setpoint and the previous 5 W power
 setting, verifies unarmed startup, presses/releases the real
@@ -250,6 +260,13 @@ can heat above the old 100 C ceiling within the power limit, and does not trigge
 rise watchdog at its effective target. It then checks the 500 C fault cutoff.
 Use `--check-heater range --instructions 200000000`, with `--fahrenheit` for
 the upper Fahrenheit setting.
+The `hold` run injects a steady temperature 5 C below the effective target,
+requires real controller modulation with the rise window cleared, and ages
+only the rise timestamp across multiple holding commands. It then returns to
+a cold fixture, requires a fresh full-effort window, and verifies a genuine
+20-second no-rise stop with the normal warning and restart lockout.
+Use `--check-heater hold --instructions 200000000`; `--fahrenheit` also exercises
+holding below the effective 450 C target.
 The `continuous` run uses a scripted temperature rise, verifies controller
 modulation and continued operation beyond six seconds, then injects the exact
 500 C reading and checks shutdown and restart lockout. Use

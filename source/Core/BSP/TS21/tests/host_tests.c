@@ -42,6 +42,7 @@ static uint16_t        adc_value;
 #ifdef TS21_HEATER_TEST
 static bool              heater_permitted;
 static int16_t           heater_target_c;
+static uint8_t           heater_limit_pwm;
 static unsigned          heater_failures;
 static bool              use_adc_fixture;
 static struct TS21Sample adc_fixture;
@@ -49,6 +50,7 @@ static uint64_t          gate_started_ticks;
 
 bool ts21_heater_permitted(void) { return heater_permitted; }
 bool ts21_heater_needs_rise(int16_t temperature) { return heater_target_c - temperature >= TS21_HEATER_RISE_C; }
+uint8_t ts21_heater_limit_pwm(void) { return heater_limit_pwm; }
 void ts21_heater_failed(void) {
   ++heater_failures;
   heater_permitted = false;
@@ -250,6 +252,7 @@ static void reset(void) {
 #ifdef TS21_HEATER_TEST
   heater_permitted = use_adc_fixture = false;
   heater_target_c                    = TS21_DEFAULT_TEMP_C;
+  heater_limit_pwm                   = 255;
   heater_failures                    = 0;
   gate_started_ticks                 = 0;
 #endif
@@ -883,6 +886,56 @@ static void test_heater_faults(void) {
   assert_heater_off();
 }
 
+static void test_regulated_hold_below_target(void) {
+  prepare_heater();
+  adc_fixture.input = 2900;
+  sample_heater();
+  setTipPWM(255, false);
+  adc_fixture.tip       = 2150; // 315 C with a 320 C target.
+  adc_fixture.tip_probe = 2504;
+  for (unsigned i = 0; i < 480; ++i) {
+    ticks += 125000ULL * TS21_TIMER_TICKS_PER_US;
+    write_count = 0;
+    sample_heater();
+    setTipPWM(8, false); // Regulated holding power, well below the 100 W ceiling.
+    if (ts21_status.errors) {
+      fprintf(stderr, "Stable 315 C hold stopped at sample %u with errors=0x%08lx\n", i, (unsigned long)ts21_status.errors);
+    }
+    assert(ts21_status.errors == 0);
+  }
+
+  sample_heater();
+  setTipPWM(255, false);
+  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
+  sample_heater();
+  assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
+  assert_heater_off();
+
+  prepare_heater();
+  adc_fixture.input = 2900;
+  heater_limit_pwm  = 12; // A lower user/supply limit is still full effort at its own ceiling.
+  sample_heater();
+  setTipPWM(12, false);
+  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
+  sample_heater();
+  assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
+  assert_heater_off();
+
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  setTipPWM(0, false);
+  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
+  sample_heater();
+  assert(ts21_status.errors == 0);
+  setTipPWM(255, false);
+  assert(ts21_status.errors == 0);
+  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
+  sample_heater();
+  assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
+  assert_heater_off();
+}
+
 static void test_continuous_temperature_control(void) {
   for (unsigned wrap = 0; wrap < 2; ++wrap) {
     prepare_heater();
@@ -1006,6 +1059,7 @@ int main(void) {
   test_worklight_during_heating();
   test_bounded_heater();
   test_heater_faults();
+  test_regulated_hold_below_target();
   test_continuous_temperature_control();
   test_passive_uart_heater();
   puts("TS21 heater tests passed: 100 W ceiling, wide power readback, low-supply limits and fault protection");

@@ -7,6 +7,7 @@
 #ifdef TS21_HEATER_TEST
 #include "OperatingModes.h"
 #include "Settings.h"
+#include "power.hpp"
 #endif
 
 volatile struct TS21Status ts21_status;
@@ -34,6 +35,8 @@ bool ts21_heater_needs_rise(int16_t temperature) {
   const TemperatureType_t target = currentTempTargetDegC;
   return (target > MAX_TEMP_C ? MAX_TEMP_C : target) - temperature >= TS21_HEATER_RISE_C;
 }
+
+uint8_t ts21_heater_limit_pwm(void) { return X10WattsToPWM(getX10WattageLimits()); }
 
 void ts21_heater_failed(void) {
   heaterArmed                 = false;

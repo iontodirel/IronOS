@@ -138,6 +138,7 @@ void     ts21_fault(uint32_t error) __attribute__((noreturn));
 #ifdef TS21_HEATER_TEST
 bool     ts21_heater_permitted(void);
 bool     ts21_heater_needs_rise(int16_t temperature);
+uint8_t  ts21_heater_limit_pwm(void);
 void     ts21_heater_failed(void);
 void     ts21_heater_check(void);
 void     ts21_heater_trip(uint32_t error);

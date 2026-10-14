@@ -138,12 +138,13 @@ static void heater_record_sample(const struct TS21Sample *sample) {
     heater_sample_ready          = true;
     if (!ts21_heater_permitted() || !ts21_heater_needs_rise(heater_temperature)) {
       heater_rise_tracking = false;
-    } else if (!heater_rise_tracking || heater_temperature >= heater_rise_temperature + TS21_HEATER_RISE_C) {
-      heater_rise_tracking    = true;
-      heater_rise_temperature = heater_temperature;
-      heater_rise_us          = heater_sample_us;
-    } else if ((uint32_t)(heater_sample_us - heater_rise_us) >= TS21_HEATER_RISE_US) {
-      heater_sample_error = TS21_ERROR_HEATER_NO_RISE;
+    } else if (heater_rise_tracking) {
+      if (heater_temperature >= heater_rise_temperature + TS21_HEATER_RISE_C) {
+        heater_rise_temperature = heater_temperature;
+        heater_rise_us          = heater_sample_us;
+      } else if ((uint32_t)(heater_sample_us - heater_rise_us) >= TS21_HEATER_RISE_US) {
+        heater_sample_error = TS21_ERROR_HEATER_NO_RISE;
+      }
     }
   }
   if (heater_sample_error && ts21_heater_permitted()) {
@@ -152,6 +153,17 @@ static void heater_record_sample(const struct TS21Sample *sample) {
 }
 
 uint32_t getTipX10Watts(void) { return heater_active && (ts21_mmio_read(TS21_TIM1) & 1U) ? heater_power_x10 : 0; }
+
+static uint32_t heater_compare(uint8_t pulse) {
+  uint32_t compare = (uint32_t)pulse * TS21_HEATER_PERIOD / 255U;
+  if (compare > heater_max_compare) {
+    compare = heater_max_compare;
+  }
+  if (compare > TS21_HEATER_PERIOD * 85 / 100) {
+    compare = TS21_HEATER_PERIOD * 85 / 100;
+  }
+  return compare;
+}
 #endif
 
 void setTipPWM(uint8_t pulse, bool fast) {
@@ -164,6 +176,7 @@ void setTipPWM(uint8_t pulse, bool fast) {
   const uint32_t error = ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS;
   ts21_heater_inhibit();
   if (!pulse || !ts21_heater_permitted()) {
+    heater_rise_tracking = false;
     irq_restore(state);
     return;
   }
@@ -176,12 +189,15 @@ void setTipPWM(uint8_t pulse, bool fast) {
     irq_restore(state);
     return;
   }
-  uint32_t compare = (uint32_t)pulse * TS21_HEATER_PERIOD / 255U;
-  if (compare > heater_max_compare) {
-    compare = heater_max_compare;
-  }
-  if (compare > TS21_HEATER_PERIOD * 85 / 100) {
-    compare = TS21_HEATER_PERIOD * 85 / 100;
+  const uint32_t compare = heater_compare(pulse);
+  const uint32_t limit   = heater_compare(ts21_heater_limit_pwm());
+  // A regulating C210 controller can hold below target; only full-effort heating must keep rising.
+  if (!compare || !limit || compare < limit || !ts21_heater_needs_rise(heater_temperature)) {
+    heater_rise_tracking = false;
+  } else if (!heater_rise_tracking) {
+    heater_rise_tracking    = true;
+    heater_rise_temperature = heater_temperature;
+    heater_rise_us          = now;
   }
   if (compare) {
     heater_command_us = now;

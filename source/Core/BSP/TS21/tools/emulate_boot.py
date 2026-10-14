@@ -37,6 +37,7 @@ parser.add_argument(
         "no-rise",
         "continuous",
         "range",
+        "hold",
         "uart",
         "monitor",
     ),
@@ -114,6 +115,9 @@ class Board:
         self.control_target = min(self.expected_target, 450)
         self.target_tip_adc = 2992 if args.fahrenheit else 2180
         self.range_started = None
+        self.hold_tip_adc = 2959 if args.fahrenheit else 2150
+        self.hold_stage = None
+        self.hold_commands = 0
         self.gate_started = None
         self.home_draws = 0
         self.button_started = None
@@ -435,7 +439,8 @@ class Board:
             return
         maximum = min(640 * 1000 * resistance // (voltage * voltage), 640 * 85 // 100)
         if (
-            args.check_heater not in ("continuous", "range") or self.heater_commands < 3
+            args.check_heater not in ("continuous", "range", "hold")
+            or self.heater_commands < 3
         ) and compare != maximum:
             self.stop(
                 f"FAIL: cold fixture did not reach the requested 100 W ceiling: CCR1={compare}"
@@ -482,6 +487,8 @@ class Board:
                 symbols["heater_rise_us"],
                 struct.pack("<I", (self.micros() - 20000000) & 0xFFFFFFFF),
             )
+        elif args.check_heater == "hold":
+            self.check_regulated_hold(compare, maximum)
         elif self.heater_commands == 3 and args.check_heater != "continuous":
             self.injected = True
             if args.check_heater in ("short", "uart"):
@@ -504,6 +511,53 @@ class Board:
             elif args.check_heater == "stall":
                 self.stall_requested = True
                 cpu.emu_stop()
+
+    def check_regulated_hold(self, compare, maximum):
+        if self.heater_commands == 3:
+            self.tip_adc = self.hold_tip_adc
+            self.hold_stage = "settling"
+        elif (
+            self.hold_stage in ("settling", "holding")
+            and self.sample_adc["tip"] == self.hold_tip_adc
+            and compare < maximum
+        ):
+            if self.status_errors() or self.ram_value("heater_rise_tracking", 1):
+                self.stop("FAIL: partial-power holding still demands temperature rise")
+                return
+            self.hold_commands += 1
+            cpu.mem_write(
+                symbols["heater_rise_us"],
+                struct.pack("<I", (self.micros() - 20000000) & 0xFFFFFFFF),
+            )
+            self.hold_stage = "holding"
+            if self.hold_commands >= 3:
+                self.tip_adc = 580
+                self.hold_stage = "reheating"
+                print(
+                    "Below-target partial-power hold stayed active with an aged rise timestamp; checking renewed full effort",
+                    flush=True,
+                )
+        elif (
+            self.hold_stage == "reheating"
+            and self.sample_adc["tip"] == 580
+            and compare == maximum
+        ):
+            if (
+                not self.ram_value("heater_rise_tracking", 1)
+                or (self.micros() - self.ram_value("heater_rise_us")) & 0xFFFFFFFF
+                >= 20000
+            ):
+                self.stop("FAIL: full effort did not start a fresh no-rise window")
+                return
+            self.injected = True
+            cpu.mem_write(
+                symbols["heater_rise_us"],
+                struct.pack("<I", (self.micros() - 20000000) & 0xFFFFFFFF),
+            )
+            print(
+                "Full-effort heating resumed; checking that 20 seconds without progress still stops output",
+                flush=True,
+            )
 
     def check_stalled_gate(self):
         steps = self.steps
@@ -633,6 +687,7 @@ class Board:
                 "no-rise": 1 << 13,
                 "continuous": 1 << 12,
                 "range": 1 << 12,
+                "hold": 1 << 13,
                 "uart": 1 << 9,
                 "monitor": 1 << 16,
             }
