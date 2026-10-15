@@ -153,7 +153,14 @@ OperatingMode guiHandleDraw(void) {
     warnUser(translatedString(Tr->WarningHeaterStopped), BUTTON_NONE);
     OLED::setCursor(32, 16);
     OLED::drawHex(ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS, FontStyle::SMALL, 8);
-    newMode = buttons != BUTTON_NONE ? OperatingMode::HomeScreen : OperatingMode::ThermalRunaway;
+    if (buttons != BUTTON_NONE) {
+      context.scratch_state.state1 = 1;
+    }
+    // Consume the complete acknowledgment gesture before allowing a new manual start.
+    if (context.scratch_state.state1 && !getButtonA() && !getButtonB()) {
+      ts21_heater_acknowledge();
+      newMode = OperatingMode::HomeScreen;
+    }
 #else
     /*TODO*/
     newMode = OperatingMode::HomeScreen;

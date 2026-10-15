@@ -40,6 +40,7 @@ parser.add_argument(
         "hold",
         "uart",
         "monitor",
+        "recover",
     ),
 )
 args = parser.parse_args()
@@ -122,9 +123,18 @@ class Board:
         self.home_draws = 0
         self.button_started = None
         self.button_mask = 1
+        self.button_duration_us = 120000
         self.injected = False
         self.fault_draws = 0
         self.fault_stage = "waiting"
+        self.expect_recovery = args.check_heater in (
+            "no-rise",
+            "hold",
+            "monitor",
+            "recover",
+        )
+        self.recovery_idle_draws = 0
+        self.recovery_heater_commands = 0
         self.disconnect_return = None
         self.last_heater_mode = None
         self.stall_requested = False
@@ -439,9 +449,13 @@ class Board:
             return
         maximum = min(640 * 1000 * resistance // (voltage * voltage), 640 * 85 // 100)
         if (
-            args.check_heater not in ("continuous", "range", "hold")
-            or self.heater_commands < 3
-        ) and compare != maximum:
+            (
+                args.check_heater not in ("continuous", "range", "hold")
+                or self.heater_commands < 3
+            )
+            and self.fault_stage != "recovering"
+            and compare != maximum
+        ):
             self.stop(
                 f"FAIL: cold fixture did not reach the requested 100 W ceiling: CCR1={compare}"
             )
@@ -461,7 +475,7 @@ class Board:
         ):
             self.stop("FAIL: heating was not manually started with a bounded target")
             return
-        if self.injected:
+        if self.injected and self.fault_stage != "recovering":
             self.stop("FAIL: heater rearmed after an injected fault")
             return
         if args.check_heater == "uart" and not self.status_errors() & (1 << 4):
@@ -475,6 +489,27 @@ class Board:
             f"CCR1={compare}/640, target={self.ram_value('currentTempTargetDegC')} C",
             flush=True,
         )
+        if self.fault_stage == "recovering":
+            if (
+                self.status_errors()
+                or not self.ram_value("heaterArmed", 1)
+                or self.ram_value("heaterThermalRunawayCounter", 1)
+            ):
+                self.stop("FAIL: a fresh manual start did not restore bounded heating")
+                return
+            self.recovery_heater_commands += 1
+            if self.recovery_heater_commands < 3:
+                return
+            if compare != maximum:
+                self.stop(
+                    "FAIL: recovered cold heating did not reach the power ceiling"
+                )
+                return
+            self.stop(
+                "PASS: healthy fault acknowledged without reboot or automatic heating; "
+                "a fresh manual press/release restarted within the power limit"
+            )
+            return
         if self.heater_commands == 3 and args.check_heater == "range":
             self.range_started = self.micros()
             self.tip_adc = self.target_tip_adc
@@ -503,7 +538,7 @@ class Board:
                 )
             elif args.check_heater == "monitor":
                 cpu.mem_write(symbols["heaterThermalRunawayCounter"], b"\xff")
-            elif args.check_heater == "no-rise":
+            elif args.check_heater in ("no-rise", "recover"):
                 cpu.mem_write(
                     symbols["heater_rise_us"],
                     struct.pack("<I", (self.micros() - 20000000) & 0xFFFFFFFF),
@@ -589,6 +624,36 @@ class Board:
         if mode != self.last_heater_mode:
             print(f"{self.micros():8d} us GUI mode {mode}", flush=True)
             self.last_heater_mode = mode
+        if (
+            self.fault_stage == "acknowledging"
+            and self.micros() - self.button_started < self.button_duration_us
+            and mode != 9
+        ):
+            self.stop("FAIL: acknowledgment left the warning while its button was held")
+            return
+        if self.fault_stage == "recovering-home":
+            if (
+                mode != 0
+                or self.status_errors()
+                or self.ram_value("heaterArmed", 1)
+                or self.ram_value("currentTempTargetDegC")
+                or self.ram_value("heaterThermalRunawayCounter", 1)
+                or self.gate_high()
+                or self.registers.get(0x40000400, 0) & 1
+            ):
+                self.stop(
+                    "FAIL: acknowledgment did not leave a healthy, unarmed home screen"
+                )
+                return
+            self.recovery_idle_draws += 1
+            if self.recovery_idle_draws >= 3:
+                self.fault_stage = "recovering"
+                self.button_mask = 1
+                self.button_duration_us = 120000
+                self.button_started = self.micros()
+                print(
+                    "Starting again with a new bottom-button press/release", flush=True
+                )
         if (
             args.check_heater == "continuous"
             and self.first_heater_us is not None
@@ -690,6 +755,7 @@ class Board:
                 "hold": 1 << 13,
                 "uart": 1 << 9,
                 "monitor": 1 << 16,
+                "recover": 1 << 13,
             }
             error = self.status_errors()
             if (
@@ -705,7 +771,10 @@ class Board:
                     if not self.check_fault_pixels(error & ~(1 << 4)):
                         return
                     self.fault_stage = "acknowledging"
-                    self.button_mask = 2
+                    self.button_mask = 1 if args.check_heater == "recover" else 2
+                    self.button_duration_us = (
+                        600000 if args.check_heater == "recover" else 120000
+                    )
                     self.button_started = self.micros()
                     print("Acknowledging the persistent stop warning", flush=True)
                 elif self.fault_stage == "retrying" and self.fault_draws >= 2:
@@ -734,14 +803,18 @@ class Board:
                         "FAIL: latched heater stop is confused with tip connection"
                     )
                     return
-                self.fault_stage = "retrying"
-                self.fault_draws = 0
-                self.button_mask = 1
-                self.button_started = self.micros()
-                print(
-                    "Checking that a bottom-button retry cannot restart heating",
-                    flush=True,
-                )
+                if self.expect_recovery:
+                    self.fault_stage = "recovering-home"
+                    self.button_started = None
+                else:
+                    self.fault_stage = "retrying"
+                    self.fault_draws = 0
+                    self.button_mask = 1
+                    self.button_started = self.micros()
+                    print(
+                        "Checking that a bottom-button retry cannot restart heating",
+                        flush=True,
+                    )
         if pc in self.trace and pc not in self.seen:
             if (
                 args.check_cold_display or args.check_heater or args.check_worklight
@@ -884,7 +957,7 @@ class Board:
             result = (1 << 5) | (1 << 7)
             if (
                 self.button_started is not None
-                and self.micros() - self.button_started < 120000
+                and self.micros() - self.button_started < self.button_duration_us
             ):
                 if self.button_mask & 1:
                     result &= ~(1 << 7)

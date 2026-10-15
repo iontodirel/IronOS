@@ -42,7 +42,6 @@ extern "C" {
 #define TS21_HEATER_CUTOFF_C      500
 #define TS21_HEATER_RISE_US       UINT32_C(20000000)
 #define TS21_HEATER_RISE_C        3
-#define TS21_HEATER_FRESH_US      UINT32_C(20000)
 #define TS21_HEATER_COMMAND_US    UINT32_C(150000)
 #define TS21_HEATER_WINDOW_MS     120U
 #define TS21_HEATER_PERIOD        (TS21_CLOCK_HZ / 100000U)
@@ -75,6 +74,9 @@ enum TS21Error {
 #ifdef TS21_HEATER_TEST
 // Passive UART telemetry is not a heater input; retain its diagnostic flag without inhibiting output.
 #define TS21_HEATER_INHIBIT_ERRORS (UINT32_MAX ^ TS21_ERROR_UART)
+#define TS21_HEATER_RECOVERABLE_ERRORS                                                                                                                                                                 \
+  (TS21_ERROR_ADC | TS21_ERROR_SENSOR | TS21_ERROR_HEATER_SHORT | TS21_ERROR_HEATER_STALE | TS21_ERROR_HEATER_TIMEOUT | TS21_ERROR_HEATER_TEMP | TS21_ERROR_HEATER_NO_RISE |                           \
+   TS21_ERROR_HEATER_SUPPLY | TS21_ERROR_HEATER_OPEN | TS21_ERROR_HEATER_MONITOR)
 #endif
 
 struct TS21PDParser {
@@ -140,6 +142,8 @@ bool     ts21_heater_permitted(void);
 bool     ts21_heater_needs_rise(int16_t temperature);
 uint8_t  ts21_heater_limit_pwm(void);
 void     ts21_heater_failed(void);
+void     ts21_heater_acknowledge(void);
+bool     ts21_heater_reset_faults(void);
 void     ts21_heater_check(void);
 void     ts21_heater_trip(uint32_t error);
 uint32_t getTipX10Watts(void);

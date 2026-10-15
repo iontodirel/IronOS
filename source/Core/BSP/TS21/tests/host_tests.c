@@ -794,10 +794,9 @@ static void test_heater_faults(void) {
 
   prepare_heater();
   sample_heater();
-  ticks += (TS21_HEATER_FRESH_US + 1U) * TS21_TIMER_TICKS_PER_US;
+  ticks += 25000U * TS21_TIMER_TICKS_PER_US;
   setTipPWM(255, false);
-  assert(ts21_status.errors & TS21_ERROR_HEATER_STALE);
-  assert_heater_off();
+  assert(ts21_status.errors == 0 && getTipX10Watts() > 0);
 
   prepare_heater();
   sample_heater();
@@ -811,8 +810,12 @@ static void test_heater_faults(void) {
   setTipPWM(255, false);
   ticks += TS21_HEATER_COMMAND_US * TS21_TIMER_TICKS_PER_US;
   ts21_heater_check();
-  assert(ts21_status.errors & TS21_ERROR_HEATER_STALE);
+  assert(ts21_status.errors == 0 && heater_failures == 0);
   assert_heater_off();
+  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
+  sample_heater();
+  setTipPWM(255, false);
+  assert(ts21_status.errors == 0 && getTipX10Watts() > 0);
 
   prepare_heater();
   sample_heater();
@@ -934,6 +937,60 @@ static void test_regulated_hold_below_target(void) {
   sample_heater();
   assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
   assert_heater_off();
+}
+
+static void test_manual_heater_recovery(void) {
+  const uint32_t recoverable[] = {TS21_ERROR_ADC,         TS21_ERROR_SENSOR,         TS21_ERROR_HEATER_SHORT,  TS21_ERROR_HEATER_STALE, TS21_ERROR_HEATER_TIMEOUT,
+                                  TS21_ERROR_HEATER_TEMP, TS21_ERROR_HEATER_NO_RISE, TS21_ERROR_HEATER_SUPPLY, TS21_ERROR_HEATER_OPEN,  TS21_ERROR_HEATER_MONITOR};
+  for (unsigned i = 0; i < sizeof(recoverable) / sizeof(recoverable[0]); ++i) {
+    prepare_heater();
+    setWorklight(true);
+    sample_heater();
+    setTipPWM(255, false);
+    ts21_heater_trip(recoverable[i]);
+    assert(!heater_permitted);
+    assert(!ts21_heater_reset_faults()); // No reset using a missing/consumed sample.
+    sample_heater();
+    assert(ts21_heater_reset_faults());
+    assert(ts21_status.errors == 0 && !heater_permitted);
+    assert_heater_off();
+    assert(*reg(TS21_GPIOA + 12) & TS21_WORKLIGHT);
+    setTipPWM(255, false);
+    assert_heater_off();
+    heater_permitted = true;
+    sample_heater();
+    setTipPWM(255, false);
+    assert(ts21_status.errors == 0 && getTipX10Watts() > 0);
+    ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
+    sample_heater();
+    assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
+    assert_heater_off();
+  }
+
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  ts21_heater_trip(TS21_ERROR_HEATER_NO_RISE);
+  adc_fixture.tip_probe = adc_fixture.tip;
+  sample_heater();
+  assert(!ts21_heater_reset_faults());
+  assert(ts21_status.errors & TS21_ERROR_HEATER_SHORT);
+  assert(!heater_permitted);
+  assert_heater_off();
+  adc_fixture.tip_probe += 354;
+  sample_heater();
+  assert(ts21_heater_reset_faults());
+  assert_heater_off();
+
+  const uint32_t nonrecoverable[] = {TS21_ERROR_CLOCK, TS21_ERROR_FLASH, TS21_ERROR_TRAP, 1U << 31};
+  for (unsigned i = 0; i < sizeof(nonrecoverable) / sizeof(nonrecoverable[0]); ++i) {
+    prepare_heater();
+    ts21_heater_trip(nonrecoverable[i] | TS21_ERROR_HEATER_NO_RISE | TS21_ERROR_UART);
+    sample_heater();
+    assert(!ts21_heater_reset_faults());
+    assert(ts21_status.errors == (nonrecoverable[i] | TS21_ERROR_UART));
+    assert_heater_off();
+  }
 }
 
 static void test_continuous_temperature_control(void) {
@@ -1060,6 +1117,7 @@ int main(void) {
   test_bounded_heater();
   test_heater_faults();
   test_regulated_hold_below_target();
+  test_manual_heater_recovery();
   test_continuous_temperature_control();
   test_passive_uart_heater();
   puts("TS21 heater tests passed: 100 W ceiling, wide power readback, low-supply limits and fault protection");

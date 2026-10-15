@@ -98,14 +98,31 @@ void ts21_heater_trip(uint32_t error) {
   ts21_heater_failed();
 }
 
+bool ts21_heater_reset_faults(void) {
+  const uint32_t state = irq_save();
+  const bool     ready = heater_sample_ready;
+  ts21_heater_inhibit();
+  heater_rise_tracking = false;
+  if (!ready || heater_sample_error) {
+    ts21_status.errors |= heater_sample_error ? heater_sample_error : TS21_ERROR_SENSOR;
+  } else {
+    ts21_status.errors &= ~TS21_HEATER_RECOVERABLE_ERRORS;
+  }
+  const bool recovered = !(ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS);
+  irq_restore(state);
+  return recovered;
+}
+
 void ts21_heater_check(void) {
   const uint32_t state = irq_save();
   const uint32_t now   = ts21_micros();
   if (heater_active && ((ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS) || !ts21_heater_permitted())) {
     ts21_heater_inhibit();
+    heater_rise_tracking = false;
   }
   if (heater_active && (uint32_t)(now - heater_command_us) >= TS21_HEATER_COMMAND_US) {
-    ts21_heater_trip(TS21_ERROR_HEATER_STALE);
+    ts21_heater_inhibit();
+    heater_rise_tracking = false;
   }
   irq_restore(state);
 }
@@ -180,7 +197,7 @@ void setTipPWM(uint8_t pulse, bool fast) {
     irq_restore(state);
     return;
   }
-  if (error || heater_sample_error || !ready || (uint32_t)(now - heater_sample_us) > TS21_HEATER_FRESH_US) {
+  if (error || heater_sample_error || !ready) {
     ts21_heater_trip(error ? error : heater_sample_error ? heater_sample_error : TS21_ERROR_HEATER_STALE);
     irq_restore(state);
     return;

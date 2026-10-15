@@ -23,11 +23,9 @@ static int16_t           handleTemperature;
 #ifdef TS21_HEATER_TEST
 static volatile bool     heaterArmed;
 static bool              heaterButtonPressed;
-static volatile uint32_t lastGUIRead;
 
 bool ts21_heater_permitted(void) {
-  return heaterArmed && currentOperatingMode == OperatingMode::Soldering && currentTempTargetDegC > 0 && currentTempTargetDegC <= TS21_HEATER_CUTOFF_C && heaterThermalRunawayCounter <= 8 &&
-         (uint32_t)(ts21_micros() - lastGUIRead) < 500000U;
+  return heaterArmed && currentOperatingMode == OperatingMode::Soldering && currentTempTargetDegC > 0 && currentTempTargetDegC <= TS21_HEATER_CUTOFF_C && heaterThermalRunawayCounter <= 8;
 }
 
 bool ts21_heater_needs_rise(int16_t temperature) {
@@ -45,7 +43,7 @@ void ts21_heater_failed(void) {
 }
 #endif
 
-static void sampleSensors() {
+static void sampleSensors(bool resetHeaterFaults = false) {
   configASSERT(xSemaphoreTake(sampleLock, portMAX_DELAY) == pdTRUE);
   TS21Sample next = {};
   sensorsValid    = ts21_sample_sensors(&next);
@@ -61,8 +59,26 @@ static void sampleSensors() {
   if (!sensorsValid) {
     ts21_status.errors |= TS21_ERROR_SENSOR;
   }
+#ifdef TS21_HEATER_TEST
+  // Reset before releasing the sample lock; the PID can consume the sample on wakeup.
+  if (resetHeaterFaults && ts21_heater_reset_faults()) {
+    requestPIDReset();
+    heaterThermalRunawayCounter = 0;
+  }
+#else
+  (void)resetHeaterFaults;
+#endif
   xSemaphoreGive(sampleLock);
 }
+
+#ifdef TS21_HEATER_TEST
+void ts21_heater_acknowledge(void) {
+  heaterArmed           = false;
+  heaterButtonPressed   = false;
+  currentTempTargetDegC = 0;
+  sampleSensors(true);
+}
+#endif
 
 extern "C" void ts21_run_constructors(void) {
   extern void (*__init_array_start[])(void);
@@ -121,7 +137,6 @@ uint16_t getInputVoltageX10(uint16_t divisor, uint8_t) {
 uint8_t getButtonA() {
   const uint8_t buttons = ts21_buttons();
 #ifdef TS21_HEATER_TEST
-  lastGUIRead = ts21_micros();
   if (currentOperatingMode == OperatingMode::HomeScreen && !(ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS)) {
     if (buttons == 1) {
       heaterButtonPressed = true;

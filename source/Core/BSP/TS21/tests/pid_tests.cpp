@@ -43,5 +43,15 @@ int main() {
     holdingPower = getPIDResultX10Watts(320, 315);
   }
   assert(holdingPower > 0 && holdingPower < HARDWARE_MAX_WATTAGE_X10);
+  testTicks += 125;
+  assert(getPIDResultX10Watts(450, 25) == 1000);
+  testTicks += 125;
+  assert(getPIDResultX10Watts(450, 499) > 0);
+  requestPIDReset(); // A recovered fault must not carry stored heat into a hot restart.
+  testTicks += 125;
+  assert(getPIDResultX10Watts(450, 499) <= 0);
+  requestPIDReset();
+  testTicks += 125;
+  assert(getPIDResultX10Watts(450, 25) == 1000);
   puts("TS21 C210 controller tests passed: shared tuning, idle/same-tick/rollover timing and bounded output");
 }
