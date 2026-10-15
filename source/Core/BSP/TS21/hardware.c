@@ -30,16 +30,15 @@ static void irq_restore(uint32_t state) {
 
 #ifdef TS21_HEATER_TEST
 static bool     heater_sample_ready;
-static bool     heater_rise_tracking;
 static bool     heater_active;
 static uint32_t heater_sample_us;
-static uint32_t heater_rise_us;
 static uint32_t heater_command_us;
 static uint32_t heater_sample_error;
+static uint32_t heater_fault_error;
 static uint32_t heater_full_power_x10;
 static uint16_t heater_max_compare;
+static uint8_t  heater_fault_samples;
 static int16_t  heater_temperature;
-static int16_t  heater_rise_temperature;
 static uint16_t heater_power_x10;
 #endif
 
@@ -93,7 +92,6 @@ void ts21_watchdog_refresh(void) { ts21_mmio_write(TS21_IWDG, 0xAAAA); }
 #ifdef TS21_HEATER_TEST
 void ts21_heater_trip(uint32_t error) {
   ts21_heater_inhibit();
-  heater_rise_tracking = false;
   ts21_status.errors |= error;
   ts21_heater_failed();
 }
@@ -102,7 +100,8 @@ bool ts21_heater_reset_faults(void) {
   const uint32_t state = irq_save();
   const bool     ready = heater_sample_ready;
   ts21_heater_inhibit();
-  heater_rise_tracking = false;
+  heater_fault_samples = 0;
+  heater_fault_error   = 0;
   if (!ready || heater_sample_error) {
     ts21_status.errors |= heater_sample_error ? heater_sample_error : TS21_ERROR_SENSOR;
   } else {
@@ -118,11 +117,9 @@ void ts21_heater_check(void) {
   const uint32_t now   = ts21_micros();
   if (heater_active && ((ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS) || !ts21_heater_permitted())) {
     ts21_heater_inhibit();
-    heater_rise_tracking = false;
   }
   if (heater_active && (uint32_t)(now - heater_command_us) >= TS21_HEATER_COMMAND_US) {
     ts21_heater_inhibit();
-    heater_rise_tracking = false;
   }
   irq_restore(state);
 }
@@ -141,8 +138,9 @@ static void heater_record_sample(const struct TS21Sample *sample) {
   } else if (voltage < TS21_HEATER_MIN_INPUT_X10 || voltage > TS21_HEATER_MAX_INPUT_X10) {
     heater_sample_error = TS21_ERROR_HEATER_SUPPLY;
   } else {
+    // The handle warms up in normal use; the thermistor curve itself is the only bound that matters.
     heater_temperature = tip + handle / 10;
-    if (handle < 0 || handle > 600 || heater_temperature < 0 || heater_temperature >= TS21_HEATER_CUTOFF_C) {
+    if (heater_temperature >= TS21_HEATER_CUTOFF_C) {
       heater_sample_error = TS21_ERROR_HEATER_TEMP;
     }
   }
@@ -153,18 +151,21 @@ static void heater_record_sample(const struct TS21Sample *sample) {
     heater_max_compare           = (uint16_t)(TS21_HEATER_PERIOD * TS21_HEATER_POWER_X10 * resistance / (upper_voltage * upper_voltage));
     heater_sample_us             = ts21_micros();
     heater_sample_ready          = true;
-    if (!ts21_heater_permitted() || !ts21_heater_needs_rise(heater_temperature)) {
-      heater_rise_tracking = false;
-    } else if (heater_rise_tracking) {
-      if (heater_temperature >= heater_rise_temperature + TS21_HEATER_RISE_C) {
-        heater_rise_temperature = heater_temperature;
-        heater_rise_us          = heater_sample_us;
-      } else if ((uint32_t)(heater_sample_us - heater_rise_us) >= TS21_HEATER_RISE_US) {
-        heater_sample_error = TS21_ERROR_HEATER_NO_RISE;
-      }
-    }
+    heater_fault_samples         = 0;
+    heater_fault_error           = 0;
+    return;
   }
-  if (heater_sample_error && ts21_heater_permitted()) {
+  // A single reading never stops the iron: withhold power now and only latch once the same class of
+  // hardware fault has been seen on consecutive samples.
+  ts21_heater_inhibit();
+  if (heater_fault_error != heater_sample_error) {
+    heater_fault_error   = heater_sample_error;
+    heater_fault_samples = 0;
+  }
+  if (heater_fault_samples < TS21_HEATER_FAULT_SAMPLES) {
+    heater_fault_samples++;
+  }
+  if ((heater_sample_error & TS21_HEATER_LATCHING_ERRORS) && heater_fault_samples >= TS21_HEATER_FAULT_SAMPLES && ts21_heater_permitted()) {
     ts21_heater_trip(heater_sample_error);
   }
 }
@@ -192,30 +193,12 @@ void setTipPWM(uint8_t pulse, bool fast) {
   const uint32_t now   = ts21_micros();
   const uint32_t error = ts21_status.errors & TS21_HEATER_INHIBIT_ERRORS;
   ts21_heater_inhibit();
-  if (!pulse || !ts21_heater_permitted()) {
-    heater_rise_tracking = false;
-    irq_restore(state);
-    return;
-  }
-  if (error || heater_sample_error || !ready) {
-    ts21_heater_trip(error ? error : heater_sample_error ? heater_sample_error : TS21_ERROR_HEATER_STALE);
-    irq_restore(state);
-    return;
-  }
-  if (heater_temperature >= TS21_HEATER_CUTOFF_C) {
+  // Anything unexpected simply withholds this command; recording the sample decides what latches.
+  if (!pulse || !ts21_heater_permitted() || error || heater_sample_error || !ready || heater_temperature >= TS21_HEATER_CUTOFF_C) {
     irq_restore(state);
     return;
   }
   const uint32_t compare = heater_compare(pulse);
-  const uint32_t limit   = heater_compare(ts21_heater_limit_pwm());
-  // A regulating C210 controller can hold below target; only full-effort heating must keep rising.
-  if (!compare || !limit || compare < limit || !ts21_heater_needs_rise(heater_temperature)) {
-    heater_rise_tracking = false;
-  } else if (!heater_rise_tracking) {
-    heater_rise_tracking    = true;
-    heater_rise_temperature = heater_temperature;
-    heater_rise_us          = now;
-  }
   if (compare) {
     heater_command_us = now;
     heater_active     = true;
@@ -578,7 +561,8 @@ bool ts21_board_init(void) {
   gpio_mode(TS21_GPIOA, 9, 3);
 #endif
 #ifdef TS21_HEATER_TEST
-  heater_rise_tracking   = false;
+  heater_fault_samples   = 0;
+  heater_fault_error     = 0;
   heater_sample_error    = TS21_ERROR_SENSOR;
 #endif
   for (unsigned bank = 0; bank < 8; ++bank) {

@@ -65,7 +65,7 @@ static void testButtonActions() {
   assert(bottom == BUTTON_F_SHORT);
   assert(handleHomeButtons(bottom, &context) == OperatingMode::Soldering);
 #ifdef TS21_HEATER_TEST
-  ts21_status.errors = TS21_ERROR_HEATER_NO_RISE;
+  ts21_status.errors = TS21_ERROR_HEATER_SHORT;
   assert(handleHomeButtons(bottom, &context) == OperatingMode::ThermalRunaway);
   assert(handleHomeButtons(top, &context) == OperatingMode::SettingsMenu);
   ts21_status.errors = TS21_ERROR_UART;

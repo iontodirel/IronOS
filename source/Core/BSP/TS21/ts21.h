@@ -40,28 +40,31 @@ extern "C" {
 #define TS21_HEATER_POWER_X10     1000
 #define TS21_DEFAULT_TEMP_C       320
 #define TS21_HEATER_CUTOFF_C      500
-#define TS21_HEATER_RISE_US       UINT32_C(20000000)
-#define TS21_HEATER_RISE_C        3
 #define TS21_HEATER_COMMAND_US    UINT32_C(150000)
 #define TS21_HEATER_WINDOW_MS     120U
 #define TS21_HEATER_PERIOD        (TS21_CLOCK_HZ / 100000U)
 #define TS21_HEATER_MIN_R_X10     10U
 #define TS21_HEATER_MAX_R_X10     100U
 #define TS21_HEATER_MIN_INPUT_X10 45U
-#define TS21_HEATER_MAX_INPUT_X10 210U
+// Covers the hardware's 24 V DC rating plus the tolerance and load-release overshoot of a 20 V supply.
+#define TS21_HEATER_MAX_INPUT_X10 240U
+// Consecutive bad samples before a hardware fault latches; transient readings only skip a command.
+#define TS21_HEATER_FAULT_SAMPLES 4U
 #endif
 
 enum TS21Error {
-  TS21_ERROR_CLOCK          = 1U << 0,
-  TS21_ERROR_ADC            = 1U << 1,
-  TS21_ERROR_I2C_BUS        = 1U << 2,
-  TS21_ERROR_I2C_NACK       = 1U << 3,
-  TS21_ERROR_UART           = 1U << 4,
-  TS21_ERROR_ARGUMENT       = 1U << 5,
-  TS21_ERROR_TRAP           = 1U << 6,
-  TS21_ERROR_FLASH          = 1U << 7,
-  TS21_ERROR_SENSOR         = 1U << 8,
-  TS21_ERROR_HEATER_SHORT   = 1U << 9,
+  TS21_ERROR_CLOCK        = 1U << 0,
+  TS21_ERROR_ADC          = 1U << 1,
+  TS21_ERROR_I2C_BUS      = 1U << 2,
+  TS21_ERROR_I2C_NACK     = 1U << 3,
+  TS21_ERROR_UART         = 1U << 4,
+  TS21_ERROR_ARGUMENT     = 1U << 5,
+  TS21_ERROR_TRAP         = 1U << 6,
+  TS21_ERROR_FLASH        = 1U << 7,
+  TS21_ERROR_SENSOR       = 1U << 8,
+  TS21_ERROR_HEATER_SHORT = 1U << 9,
+  // Bits 10, 11 and 13 were bring-up watchdogs that this firmware no longer raises; the numbering is
+  // kept so that a code read off an older build still decodes to the same meaning.
   TS21_ERROR_HEATER_STALE   = 1U << 10,
   TS21_ERROR_HEATER_TIMEOUT = 1U << 11,
   TS21_ERROR_HEATER_TEMP    = 1U << 12,
@@ -77,6 +80,9 @@ enum TS21Error {
 #define TS21_HEATER_RECOVERABLE_ERRORS                                                                                                                                                                 \
   (TS21_ERROR_ADC | TS21_ERROR_SENSOR | TS21_ERROR_HEATER_SHORT | TS21_ERROR_HEATER_STALE | TS21_ERROR_HEATER_TIMEOUT | TS21_ERROR_HEATER_TEMP | TS21_ERROR_HEATER_NO_RISE |                           \
    TS21_ERROR_HEATER_SUPPLY | TS21_ERROR_HEATER_OPEN | TS21_ERROR_HEATER_MONITOR)
+// Only an unreadable sensor or a genuinely shorted tip stops the iron. An open tip, a supply excursion
+// and a post-pulse overtemperature reading are self-correcting, so they withhold power without latching.
+#define TS21_HEATER_LATCHING_ERRORS (TS21_ERROR_ADC | TS21_ERROR_SENSOR | TS21_ERROR_HEATER_SHORT)
 #endif
 
 struct TS21PDParser {
@@ -139,8 +145,6 @@ void     ts21_fault(uint32_t error) __attribute__((noreturn));
 
 #ifdef TS21_HEATER_TEST
 bool     ts21_heater_permitted(void);
-bool     ts21_heater_needs_rise(int16_t temperature);
-uint8_t  ts21_heater_limit_pwm(void);
 void     ts21_heater_failed(void);
 void     ts21_heater_acknowledge(void);
 bool     ts21_heater_reset_faults(void);

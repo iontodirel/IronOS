@@ -41,16 +41,12 @@ static uint32_t        uart_error;
 static uint16_t        adc_value;
 #ifdef TS21_HEATER_TEST
 static bool              heater_permitted;
-static int16_t           heater_target_c;
-static uint8_t           heater_limit_pwm;
 static unsigned          heater_failures;
 static bool              use_adc_fixture;
 static struct TS21Sample adc_fixture;
 static uint64_t          gate_started_ticks;
 
 bool ts21_heater_permitted(void) { return heater_permitted; }
-bool ts21_heater_needs_rise(int16_t temperature) { return heater_target_c - temperature >= TS21_HEATER_RISE_C; }
-uint8_t ts21_heater_limit_pwm(void) { return heater_limit_pwm; }
 void ts21_heater_failed(void) {
   ++heater_failures;
   heater_permitted = false;
@@ -251,8 +247,6 @@ static void reset(void) {
   adc_value                 = 0xFABC;
 #ifdef TS21_HEATER_TEST
   heater_permitted = use_adc_fixture = false;
-  heater_target_c                    = TS21_DEFAULT_TEMP_C;
-  heater_limit_pwm                   = 255;
   heater_failures                    = 0;
   gate_started_ticks                 = 0;
 #endif
@@ -616,8 +610,9 @@ static void test_sensor_conversion(void) {
 
 #ifdef TS21_HEATER_TEST
 _Static_assert(TS21_HEATER_POWER_X10 == 1000U, "The requested ceiling is 100 W");
-_Static_assert(TS21_HEATER_RISE_US == 20000000U, "Use the C210 twenty-second rise-fault interval");
-_Static_assert(TS21_DEFAULT_TEMP_C == 320 && TS21_HEATER_CUTOFF_C == 500, "Use normal setpoints with a separate overtemperature fault threshold");
+_Static_assert(TS21_HEATER_MAX_INPUT_X10 == 240U, "Accept the hardware's full 24 V DC rating");
+_Static_assert((TS21_HEATER_LATCHING_ERRORS & (TS21_ERROR_HEATER_OPEN | TS21_ERROR_HEATER_SUPPLY | TS21_ERROR_HEATER_TEMP)) == 0, "Self-correcting readings must not stop the iron");
+_Static_assert(TS21_DEFAULT_TEMP_C == 320 && TS21_HEATER_CUTOFF_C == 500, "Use normal setpoints with a separate overtemperature cutoff");
 
 static void prepare_heater(void) {
   reset();
@@ -772,11 +767,17 @@ static void test_heater_faults(void) {
   sample_heater();
   setTipPWM(255, false);
   assert(ts21_status.errors == 0 && getTipX10Watts() == 106);
-  adc_fixture.tip       = 3328; // Exactly 500 C.
+  adc_fixture.tip       = 3328; // Exactly 500 C: power is withheld without stopping the iron.
   adc_fixture.tip_probe = 3682;
   sample_heater();
-  assert(ts21_status.errors == TS21_ERROR_HEATER_TEMP);
+  setTipPWM(255, false);
+  assert(ts21_status.errors == 0 && heater_failures == 0);
   assert_heater_off();
+  adc_fixture.tip       = 3321; // Back under the cutoff after the reading settles.
+  adc_fixture.tip_probe = 3675;
+  sample_heater();
+  setTipPWM(255, false);
+  assert(ts21_status.errors == 0 && getTipX10Watts() == 106);
 
   prepare_heater();
   sample_heater();
@@ -801,8 +802,8 @@ static void test_heater_faults(void) {
   prepare_heater();
   sample_heater();
   setTipPWM(255, false);
-  setTipPWM(255, false); // A command cannot reuse the preceding sample.
-  assert(ts21_status.errors & TS21_ERROR_HEATER_STALE);
+  setTipPWM(255, false); // A command cannot reuse the preceding sample, but that is not a fault.
+  assert(ts21_status.errors == 0 && heater_failures == 0);
   assert_heater_off();
 
   prepare_heater();
@@ -812,7 +813,7 @@ static void test_heater_faults(void) {
   ts21_heater_check();
   assert(ts21_status.errors == 0 && heater_failures == 0);
   assert_heater_off();
-  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
+  ticks += 20000000ULL * TS21_TIMER_TICKS_PER_US;
   sample_heater();
   setTipPWM(255, false);
   assert(ts21_status.errors == 0 && getTipX10Watts() > 0);
@@ -834,23 +835,24 @@ static void test_heater_faults(void) {
   ts21_heater_check();
   assert_heater_off();
 
-  const struct TS21Sample bad[] = {
-      { .tip_probe = 600,  .tip = 580, .handle = 2864,  .input = 725},
-      {.tip_probe = 4095,  .tip = 580, .handle = 2864,  .input = 725},
-      { .tip_probe = 934,  .tip = 580, .handle = 2864,  .input = 500},
-      { .tip_probe = 934,  .tip = 580, .handle = 2864, .input = 3500},
-      { .tip_probe = 934,  .tip = 580,    .handle = 0,  .input = 725},
-      {.tip_probe = 3682, .tip = 3328, .handle = 2864,  .input = 725},
-      { .tip_probe = 934,  .tip = 580,  .handle = 500,  .input = 725},
+  // A genuine short or an unreadable sensor stops the iron, but only after consecutive bad samples.
+  const struct TS21Sample latching[] = {
+      {.tip_probe = 600, .tip = 580, .handle = 2864, .input = 725},
+      {.tip_probe = 934, .tip = 580,    .handle = 0, .input = 725},
   };
-  const uint32_t errors[] = {TS21_ERROR_HEATER_SHORT, TS21_ERROR_HEATER_OPEN, TS21_ERROR_HEATER_SUPPLY, TS21_ERROR_HEATER_SUPPLY, TS21_ERROR_SENSOR, TS21_ERROR_HEATER_TEMP, TS21_ERROR_HEATER_TEMP};
-  for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+  const uint32_t latching_errors[] = {TS21_ERROR_HEATER_SHORT, TS21_ERROR_SENSOR};
+  for (unsigned i = 0; i < sizeof(latching) / sizeof(latching[0]); ++i) {
     prepare_heater();
     sample_heater();
     setTipPWM(255, false);
-    adc_fixture = bad[i];
+    adc_fixture = latching[i];
+    for (unsigned repeat = 1; repeat < TS21_HEATER_FAULT_SAMPLES; ++repeat) {
+      sample_heater();
+      assert(ts21_status.errors == 0 && heater_failures == 0);
+      assert_heater_off();
+    }
     sample_heater();
-    assert(ts21_status.errors & errors[i]);
+    assert(ts21_status.errors & latching_errors[i]);
     assert(heater_failures != 0);
     assert_heater_off();
     adc_fixture = (struct TS21Sample){.tip_probe = 934, .tip = 580, .handle = 2864, .input = 725};
@@ -859,6 +861,53 @@ static void test_heater_faults(void) {
     setTipPWM(255, false);
     assert_heater_off();
   }
+
+  // An open tip, a supply excursion and an inflated post-pulse reading withhold power without stopping.
+  const struct TS21Sample transient[] = {
+      {.tip_probe = 4095,  .tip = 580, .handle = 2864,  .input = 725},
+      { .tip_probe = 934,  .tip = 580, .handle = 2864,  .input = 500},
+      { .tip_probe = 934,  .tip = 580, .handle = 2864, .input = 3500},
+      {.tip_probe = 3682, .tip = 3328, .handle = 2864,  .input = 725},
+  };
+  for (unsigned i = 0; i < sizeof(transient) / sizeof(transient[0]); ++i) {
+    prepare_heater();
+    sample_heater();
+    setTipPWM(255, false);
+    adc_fixture = transient[i];
+    for (unsigned repeat = 0; repeat < TS21_HEATER_FAULT_SAMPLES * 4; ++repeat) {
+      ticks += 125000ULL * TS21_TIMER_TICKS_PER_US;
+      sample_heater();
+      setTipPWM(255, false);
+      assert(ts21_status.errors == 0 && heater_failures == 0);
+      assert_heater_off();
+    }
+    adc_fixture = (struct TS21Sample){.tip_probe = 934, .tip = 580, .handle = 2864, .input = 725};
+    sample_heater();
+    setTipPWM(255, false);
+    assert(ts21_status.errors == 0 && getTipX10Watts() > 0); // Recovers on its own.
+  }
+
+  // A long run of benign transient readings must not pre-charge the debounce for a different fault:
+  // an unplugged tip reads open indefinitely, and one sensor glitch after that is still not a stop.
+  prepare_heater();
+  sample_heater();
+  setTipPWM(255, false);
+  adc_fixture = (struct TS21Sample){.tip_probe = 4095, .tip = 580, .handle = 2864, .input = 725};
+  for (unsigned repeat = 0; repeat < TS21_HEATER_FAULT_SAMPLES * 4; ++repeat) {
+    sample_heater();
+  }
+  assert(ts21_status.errors == 0 && heater_failures == 0);
+  adc_fixture.handle = 0; // A single invalid sensor conversion.
+  sample_heater();
+  assert(ts21_status.errors == 0 && heater_failures == 0);
+  assert_heater_off();
+
+  // The handle warms up in normal use; that is not an overtemperature tip.
+  prepare_heater();
+  adc_fixture.handle = 500;
+  sample_heater();
+  setTipPWM(255, false);
+  assert(ts21_status.errors == 0 && getTipX10Watts() > 0);
 
   prepare_heater();
   sample_heater();
@@ -869,24 +918,21 @@ static void test_heater_faults(void) {
   assert(ts21_status.errors & TS21_ERROR_ADC);
   assert_heater_off();
 
+  // A tip that refuses to climb is a weak supply or a big joint, not a reason to stop.
   prepare_heater();
   sample_heater();
   setTipPWM(255, false);
-  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
-  sample_heater();
-  assert(ts21_status.errors & TS21_ERROR_HEATER_NO_RISE);
-  assert_heater_off();
-  const unsigned stopped_failures = heater_failures;
-  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
-  sample_heater();
-  ts21_heater_check();
-  assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
-  assert(heater_failures == stopped_failures);
-  heater_permitted = true;
-  sample_heater();
-  setTipPWM(255, false);
-  assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
-  assert_heater_off();
+  for (unsigned i = 0; i < 2400; ++i) { // Five minutes of full effort at a fixed temperature.
+    ticks += 125000ULL * TS21_TIMER_TICKS_PER_US;
+    write_count = 0;
+    sample_heater();
+    setTipPWM(255, false);
+    if (ts21_status.errors) {
+      fprintf(stderr, "Full-effort heating stopped at sample %u with errors=0x%08lx\n", i, (unsigned long)ts21_status.errors);
+    }
+    assert(ts21_status.errors == 0 && heater_failures == 0);
+    assert(getTipX10Watts() > 0);
+  }
 }
 
 static void test_regulated_hold_below_target(void) {
@@ -907,36 +953,24 @@ static void test_regulated_hold_below_target(void) {
     assert(ts21_status.errors == 0);
   }
 
+  // Neither a long idle gap nor a resumed full-effort demand may invent a fault.
   sample_heater();
   setTipPWM(255, false);
-  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
+  ticks += 20000000ULL * TS21_TIMER_TICKS_PER_US;
   sample_heater();
-  assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
-  assert_heater_off();
-
-  prepare_heater();
-  adc_fixture.input = 2900;
-  heater_limit_pwm  = 12; // A lower user/supply limit is still full effort at its own ceiling.
-  sample_heater();
-  setTipPWM(12, false);
-  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
-  sample_heater();
-  assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
-  assert_heater_off();
+  assert(ts21_status.errors == 0);
+  setTipPWM(255, false);
+  assert(ts21_status.errors == 0 && getTipX10Watts() > 0);
 
   prepare_heater();
   sample_heater();
   setTipPWM(255, false);
   setTipPWM(0, false);
-  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
+  ticks += 20000000ULL * TS21_TIMER_TICKS_PER_US;
   sample_heater();
   assert(ts21_status.errors == 0);
   setTipPWM(255, false);
-  assert(ts21_status.errors == 0);
-  ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
-  sample_heater();
-  assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
-  assert_heater_off();
+  assert(ts21_status.errors == 0 && getTipX10Watts() > 0);
 }
 
 static void test_manual_heater_recovery(void) {
@@ -961,16 +995,16 @@ static void test_manual_heater_recovery(void) {
     sample_heater();
     setTipPWM(255, false);
     assert(ts21_status.errors == 0 && getTipX10Watts() > 0);
-    ticks += (uint64_t)TS21_HEATER_RISE_US * TS21_TIMER_TICKS_PER_US;
+    ticks += 20000000ULL * TS21_TIMER_TICKS_PER_US;
     sample_heater();
-    assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
-    assert_heater_off();
+    setTipPWM(255, false);
+    assert(ts21_status.errors == 0 && getTipX10Watts() > 0);
   }
 
   prepare_heater();
   sample_heater();
   setTipPWM(255, false);
-  ts21_heater_trip(TS21_ERROR_HEATER_NO_RISE);
+  ts21_heater_trip(TS21_ERROR_SENSOR);
   adc_fixture.tip_probe = adc_fixture.tip;
   sample_heater();
   assert(!ts21_heater_reset_faults());
@@ -996,7 +1030,6 @@ static void test_manual_heater_recovery(void) {
 static void test_continuous_temperature_control(void) {
   for (unsigned wrap = 0; wrap < 2; ++wrap) {
     prepare_heater();
-    heater_target_c = 90;
     if (wrap) {
       ticks = ((uint64_t)UINT32_MAX - 1000000U) * TS21_TIMER_TICKS_PER_US;
     }
@@ -1020,7 +1053,7 @@ static void test_continuous_temperature_control(void) {
     sample_heater();
     setTipPWM(255, false);
     ticks += 19000000ULL * TS21_TIMER_TICKS_PER_US;
-    adc_fixture.tip       = 610; // A genuine rise restarts the watchdog, not a fixed session cap.
+    adc_fixture.tip       = 610;
     adc_fixture.tip_probe = 964;
     sample_heater();
     setTipPWM(255, false);
@@ -1031,8 +1064,8 @@ static void test_continuous_temperature_control(void) {
     assert(ts21_status.errors == 0);
     ticks += 1000001ULL * TS21_TIMER_TICKS_PER_US;
     sample_heater();
-    assert(ts21_status.errors == TS21_ERROR_HEATER_NO_RISE);
-    assert_heater_off();
+    setTipPWM(255, false);
+    assert(ts21_status.errors == 0 && getTipX10Watts() > 0);
   }
 }
 

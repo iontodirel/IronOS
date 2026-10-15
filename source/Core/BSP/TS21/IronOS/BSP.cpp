@@ -18,6 +18,7 @@ static StaticSemaphore_t sampleLockBuffer;
 static SemaphoreHandle_t sampleLock;
 static TS21Sample        sensors;
 static bool              sensorsValid;
+static bool              sensorsEverValid;
 static int16_t           handleTemperature;
 
 #ifdef TS21_HEATER_TEST
@@ -27,14 +28,6 @@ static bool              heaterButtonPressed;
 bool ts21_heater_permitted(void) {
   return heaterArmed && currentOperatingMode == OperatingMode::Soldering && currentTempTargetDegC > 0 && currentTempTargetDegC <= TS21_HEATER_CUTOFF_C && heaterThermalRunawayCounter <= 8;
 }
-
-bool ts21_heater_needs_rise(int16_t temperature) {
-  // Match the shared controller's Celsius clamp, including the 850 F setting.
-  const TemperatureType_t target = currentTempTargetDegC;
-  return (target > MAX_TEMP_C ? MAX_TEMP_C : target) - temperature >= TS21_HEATER_RISE_C;
-}
-
-uint8_t ts21_heater_limit_pwm(void) { return X10WattsToPWM(getX10WattageLimits()); }
 
 void ts21_heater_failed(void) {
   heaterArmed                 = false;
@@ -56,8 +49,18 @@ static void sampleSensors(bool resetHeaterFaults = false) {
     ts21_status.raw_adc[3] = next.input;
   }
   ts21_status.adc_valid_mask = sensorsValid ? 15 : 0;
-  if (!sensorsValid) {
-    ts21_status.errors |= TS21_ERROR_SENSOR;
+  // A single failed conversion is transient; only a sustained failure is a real sensor fault.
+  static uint8_t sensorFailures;
+  if (sensorsValid) {
+    sensorsEverValid = true;
+    sensorFailures   = 0;
+  } else {
+    if (sensorFailures < 4) {
+      sensorFailures++;
+    }
+    if (sensorFailures >= 4) {
+      ts21_status.errors |= TS21_ERROR_SENSOR;
+    }
   }
 #ifdef TS21_HEATER_TEST
   // Reset before releasing the sample lock; the PID can consume the sample on wakeup.
@@ -123,7 +126,12 @@ uint16_t getTipRawTemp(uint8_t refresh) {
   if (refresh) {
     sampleSensors();
   }
-  return sensorsValid ? sensors.tip : ADC_MAX_READING - 1;
+  // Hold the last good reading over a dropped conversion; a pegged value would look like a stuck ADC
+  // to the shared thermal-runaway monitor.
+  if (sensorsEverValid) {
+    return sensors.tip;
+  }
+  return ADC_MAX_READING - 1;
 }
 
 uint16_t getInputVoltageX10(uint16_t divisor, uint8_t) {

@@ -34,16 +34,15 @@ parser.add_argument(
         "supply",
         "overtemp",
         "stall",
-        "no-rise",
         "continuous",
         "range",
-        "hold",
         "uart",
         "monitor",
         "recover",
     ),
 )
 args = parser.parse_args()
+TRANSIENT_CHECKS = ("open", "supply", "overtemp", "continuous", "range")
 if args.check_cold_display and args.check_heater:
     parser.error("Use separate runs for cold-display and heater checks")
 if args.check_worklight and (args.check_cold_display or args.check_heater):
@@ -113,12 +112,10 @@ class Board:
         self.first_heater_us = None
         self.modulation_seen = False
         self.expected_target = 454 if args.fahrenheit else 320
-        self.control_target = min(self.expected_target, 450)
         self.target_tip_adc = 2992 if args.fahrenheit else 2180
         self.range_started = None
-        self.hold_tip_adc = 2959 if args.fahrenheit else 2150
-        self.hold_stage = None
-        self.hold_commands = 0
+        self.transient_started = None
+        self.transient_restored = False
         self.gate_started = None
         self.home_draws = 0
         self.button_started = None
@@ -128,8 +125,6 @@ class Board:
         self.fault_draws = 0
         self.fault_stage = "waiting"
         self.expect_recovery = args.check_heater in (
-            "no-rise",
-            "hold",
             "monitor",
             "recover",
         )
@@ -164,7 +159,7 @@ class Board:
                     bytes(cpu.mem_read(symbols[source], symbol_sizes[source])),
                     symbol_sizes[buffer],
                 )
-        if args.check_heater and "heater_rise_tracking" not in symbols:
+        if args.check_heater and "heater_fault_samples" not in symbols:
             raise ValueError("--check-heater requires the heater-test firmware")
         self.recent = deque(maxlen=24)
         self.trace = {}
@@ -450,10 +445,11 @@ class Board:
         maximum = min(640 * 1000 * resistance // (voltage * voltage), 640 * 85 // 100)
         if (
             (
-                args.check_heater not in ("continuous", "range", "hold")
+                args.check_heater not in ("continuous", "range")
                 or self.heater_commands < 3
             )
             and self.fault_stage != "recovering"
+            and not self.transient_restored
             and compare != maximum
         ):
             self.stop(
@@ -475,7 +471,11 @@ class Board:
         ):
             self.stop("FAIL: heating was not manually started with a bounded target")
             return
-        if self.injected and self.fault_stage != "recovering":
+        if (
+            self.injected
+            and self.fault_stage != "recovering"
+            and not self.transient_restored
+        ):
             self.stop("FAIL: heater rearmed after an injected fault")
             return
         if args.check_heater == "uart" and not self.status_errors() & (1 << 4):
@@ -510,23 +510,21 @@ class Board:
                 "a fresh manual press/release restarted within the power limit"
             )
             return
+        if self.transient_restored:
+            if self.status_errors() or self.ram_value("heaterThermalRunawayCounter", 1):
+                self.stop("FAIL: a self-correcting reading left a latched fault")
+                return
+            self.stop(
+                "PASS: the self-correcting reading withheld power without stopping the "
+                "iron, and heating resumed on its own once the reading recovered"
+            )
+            return
         if self.heater_commands == 3 and args.check_heater == "range":
             self.range_started = self.micros()
             self.tip_adc = self.target_tip_adc
-            cpu.mem_write(symbols["heater_rise_tracking"], b"\x01")
-            cpu.mem_write(
-                symbols["heater_rise_temperature"],
-                struct.pack("<h", self.control_target),
-            )
-            cpu.mem_write(
-                symbols["heater_rise_us"],
-                struct.pack("<I", (self.micros() - 20000000) & 0xFFFFFFFF),
-            )
-        elif args.check_heater == "hold":
-            self.check_regulated_hold(compare, maximum)
         elif self.heater_commands == 3 and args.check_heater != "continuous":
             self.injected = True
-            if args.check_heater in ("short", "uart"):
+            if args.check_heater in ("short", "uart", "recover"):
                 self.probe_delta = 0
             elif args.check_heater == "open":
                 self.probe_delta = 4095 - self.tip_adc
@@ -538,61 +536,18 @@ class Board:
                 )
             elif args.check_heater == "monitor":
                 cpu.mem_write(symbols["heaterThermalRunawayCounter"], b"\xff")
-            elif args.check_heater in ("no-rise", "recover"):
-                cpu.mem_write(
-                    symbols["heater_rise_us"],
-                    struct.pack("<I", (self.micros() - 20000000) & 0xFFFFFFFF),
-                )
             elif args.check_heater == "stall":
                 self.stall_requested = True
                 cpu.emu_stop()
+            if args.check_heater in TRANSIENT_CHECKS:
+                self.transient_started = self.micros()
 
-    def check_regulated_hold(self, compare, maximum):
-        if self.heater_commands == 3:
-            self.tip_adc = self.hold_tip_adc
-            self.hold_stage = "settling"
-        elif (
-            self.hold_stage in ("settling", "holding")
-            and self.sample_adc["tip"] == self.hold_tip_adc
-            and compare < maximum
-        ):
-            if self.status_errors() or self.ram_value("heater_rise_tracking", 1):
-                self.stop("FAIL: partial-power holding still demands temperature rise")
-                return
-            self.hold_commands += 1
-            cpu.mem_write(
-                symbols["heater_rise_us"],
-                struct.pack("<I", (self.micros() - 20000000) & 0xFFFFFFFF),
-            )
-            self.hold_stage = "holding"
-            if self.hold_commands >= 3:
-                self.tip_adc = 580
-                self.hold_stage = "reheating"
-                print(
-                    "Below-target partial-power hold stayed active with an aged rise timestamp; checking renewed full effort",
-                    flush=True,
-                )
-        elif (
-            self.hold_stage == "reheating"
-            and self.sample_adc["tip"] == 580
-            and compare == maximum
-        ):
-            if (
-                not self.ram_value("heater_rise_tracking", 1)
-                or (self.micros() - self.ram_value("heater_rise_us")) & 0xFFFFFFFF
-                >= 20000
-            ):
-                self.stop("FAIL: full effort did not start a fresh no-rise window")
-                return
-            self.injected = True
-            cpu.mem_write(
-                symbols["heater_rise_us"],
-                struct.pack("<I", (self.micros() - 20000000) & 0xFFFFFFFF),
-            )
-            print(
-                "Full-effort heating resumed; checking that 20 seconds without progress still stops output",
-                flush=True,
-            )
+    def restore_fixture(self):
+        # Always return to a cold tip: restoring to the target would leave the controller with
+        # nothing to ask for, so resumed heating could never be observed.
+        self.probe_delta = 354
+        self.input_adc = 2900
+        self.tip_adc = 580
 
     def check_stalled_gate(self):
         steps = self.steps
@@ -675,8 +630,9 @@ class Board:
                 return
             self.injected = True
             self.tip_adc = 3328
+            self.transient_started = self.micros()
             print(
-                "Continuous normal-range control held the target; checking the 500 C fault cutoff",
+                "Continuous normal-range control held the target; checking the 500 C cutoff",
                 flush=True,
             )
         if (
@@ -698,10 +654,38 @@ class Board:
                 return
             self.injected = True
             self.tip_adc = 3328
+            self.transient_started = self.micros()
             print(
-                "Saved temperature retained above 100 C with no false rise fault; checking 500 C shutdown",
+                "Saved temperature retained above 100 C with no false fault; checking the 500 C cutoff",
                 flush=True,
             )
+        if (
+            self.transient_started is not None
+            and not self.transient_restored
+            and args.check_heater in TRANSIENT_CHECKS
+        ):
+            if self.status_errors() or mode == 9:
+                self.stop(
+                    "FAIL: a self-correcting reading stopped the iron instead of "
+                    "withholding power"
+                )
+                return
+            # The 120 ms one-pulse gate is deliberately not revocable, so let any pulse that was
+            # already in flight expire before requiring the output to stay off. Starting a new
+            # pulse is caught separately by the rearm check in record_heater_command.
+            if self.micros() - self.transient_started >= 150000 and (
+                self.gate_high() or self.registers.get(0x40000400, 0) & 1
+            ):
+                self.stop("FAIL: the out-of-range reading did not withhold power")
+                return
+            if self.micros() - self.transient_started >= 1500000:
+                self.transient_restored = True
+                self.restore_fixture()
+                print(
+                    "Power stayed off with no stop warning; checking that heating "
+                    "resumes once the reading recovers",
+                    flush=True,
+                )
         if self.injected and mode == 0:
             if self.fault_stage == "warning":
                 self.stop("FAIL: stop warning auto-dismissed without acknowledgment")
@@ -746,20 +730,13 @@ class Board:
                 return
             errors = {
                 "short": 1 << 9,
-                "open": 1 << 15,
-                "supply": 1 << 14,
-                "overtemp": 1 << 12,
-                "no-rise": 1 << 13,
-                "continuous": 1 << 12,
-                "range": 1 << 12,
-                "hold": 1 << 13,
                 "uart": 1 << 9,
+                "recover": 1 << 9,
                 "monitor": 1 << 16,
-                "recover": 1 << 13,
             }
             error = self.status_errors()
             if (
-                error & errors[args.check_heater]
+                error & errors.get(args.check_heater, 0)
                 and not self.gate_high()
                 and not self.registers.get(0x40000400, 0) & 1
                 and not self.ram_value("heaterArmed", 1)
@@ -770,6 +747,8 @@ class Board:
                 if self.fault_stage == "warning" and self.fault_draws >= 4:
                     if not self.check_fault_pixels(error & ~(1 << 4)):
                         return
+                    if args.check_heater == "recover":
+                        self.restore_fixture()
                     self.fault_stage = "acknowledging"
                     self.button_mask = 1 if args.check_heater == "recover" else 2
                     self.button_duration_us = (

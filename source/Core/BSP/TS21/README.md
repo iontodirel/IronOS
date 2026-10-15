@@ -114,34 +114,45 @@ Requests consume a valid sensor sample. Each accepted request produces at most
 a 120 ms gate pulse; tasks and interrupt execution may stop without extending
 that hardware pulse. The earlier 20 ms sample-age trip, 150 ms command-timeout
 fault and 500 ms GUI lease were TS21 bring-up additions, not copied stock
-firmware policy, and are removed. A controller pause still leaves output off
-and resets rise tracking, but no longer causes a latched timing fault.
+firmware policy, and are removed. A controller pause still leaves output off,
+but no longer causes a latched timing fault.
 
 This image accepts measured resistance from 1.0 through 10.0 ohms and input
-voltage from 4.5 through 21.0 V; these are conservative test acceptance bounds,
-not claimed cartridge specifications. Short/open resistance, invalid sensors,
-invalid supply, handle temperature outside 0..60 C and tip temperature at or
-above **500 C** inhibit output. This is a separate sensor-range/overtemperature
-fault threshold above the normal operating setpoints. Recoverable heater
-faults require acknowledgment and healthy new readings, not a reboot.
-There is **no fixed three- or five-second heating-session cutoff**. Normal
-temperature control continues until the user exits or a protection acts.
-The board requires at least 3 C progress within a 20-second window while the
-tip is at least 3 C below target **and heating is at its effective power ceiling**.
-The ceiling uses the shared controller's available-power, user, supply, hardware
-and optional derating limits, converted to PWM and clamped by the driver's raw
-power and duty limits. Only an accepted full-effort command starts this window;
-progress restarts it, while partial/zero power, being near target or idle resets it.
-Full effort after warm-up starts a fresh window, so an earlier successful rise
-does not excuse a later stalled full-power heat-up.
-The shared C210 decaying integrator can legitimately hold a steady temperature
-slightly below target at partial power. The previous guard incorrectly demanded
-another 3 C rise every 20 seconds even in that state, reproducing `00002000` at a
-stable 315 C with a 320 C target. Normal partial-power holding no longer trips
-this extra guard; genuine no-response heating and the other protections remain.
-The rise check uses the same effective Celsius target as the shared controller:
-the 850 F selection converts to 454 C, but the controller limits it to 450 C.
-That normal conversion must not produce a false no-rise fault at 450 C.
+voltage from 4.5 through 24.0 V; these are conservative test acceptance bounds,
+not claimed cartridge specifications. The upper voltage bound covers the
+hardware's 24 V DC rating so that a 20 V PD rail's tolerance and switching
+overshoot are not read as an invalid supply.
+
+Protections are split into two classes.
+
+**Latching faults** stop heating, show a stop code, and require acknowledgment
+plus healthy new readings rather than a reboot: resistance below the
+short-circuit threshold, an invalid sensor conversion, and an invalid ADC
+result. Each requires `TS21_HEATER_FAULT_SAMPLES` consecutive bad samples
+before it latches, so one dropped conversion cannot end a session silently.
+
+**Non-latching inhibits** withhold output only while the condition is present
+and then resume automatically, with no stop code and no acknowledgment:
+open or out-of-range resistance, supply voltage outside the accepted range,
+and a tip temperature reading at or above **500 C**. These conditions are
+self-correcting in normal use, so latching them was the wrong response. The
+500 C threshold is still a sensor-range cutoff above the normal setpoints;
+because the TS21 thermocouple reads high for a short period after the gate
+closes, a post-pulse sample near a 450 C setpoint can momentarily exceed it.
+Withholding that single pulse is correct; stopping the session is not.
+
+There is **no fixed three- or five-second heating-session cutoff** and **no
+rise/progress watchdog**. Normal temperature control continues until the user
+exits or a protection acts. The earlier 3 C-in-20-seconds guard was a TS21
+bring-up addition rather than stock or upstream policy; at full effort a weak
+supply, a large thermal load or a cold heat-up can legitimately fail it, so it
+is removed. The upstream IronOS thermal-runaway monitor is retained unchanged.
+
+The handle temperature bound was also removed. The handle thermistor curve is
+valid from -30 to 125 C, and a TS21 handle normally passes 60 C during ordinary
+soldering, so the previous 0..60 C latch produced a stop after several minutes
+of otherwise correct operation.
+
 An inadequate supply can still make setpoints slow or unreachable; do not
 bypass a protection trip to compensate for insufficient power.
 
@@ -160,25 +171,24 @@ full-power demand is not carried into an already-hot tip.
 If a short, invalid reading or other unsafe condition remains, another start
 is still refused. Flash, clock, trap and unknown faults are not cleared by
 heater acknowledgment. Passive UART diagnostic bits are excluded from the code.
-The rise watchdog stops with the fault, so cooling afterward does not add
-another no-rise fault.
 
 | Stop code | Meaning |
 | --- | --- |
-| `00002000` | Less than 3 C progress within 20 seconds of full-effort heating below target |
-| `00000400` | Missing or already-consumed sensor sample |
 | `00000200` | Resistance below the short-circuit threshold |
-| `00008000` | Open/clipped or out-of-range high resistance reading |
-| `00004000` | Input voltage outside the accepted test range |
-| `00001000` | Tip/handle temperature outside the accepted range |
 | `00000100` | Invalid sensor conversion |
 | `00010000` | The shared IronOS thermal monitor stopped heating |
 
 Codes are a bitmask; multiple flags can be combined. Other bits are defined in
 `ts21.h`. A shared thermal-monitor stop also disables and disarms the board
 before it is displayed; acknowledgment does not bypass current sensor checks.
-`00000800` belongs to the previous timed test; this build does not generate it.
 Record persistent fault codes and readings instead of repeatedly trying to heat.
+
+Bit numbering is unchanged so that previously photographed codes still decode,
+but this build no longer generates `00002000` (no-rise), `00000400` (missing or
+already-consumed sample), `00000800` (previous timed test), `00008000`
+(open/out-of-range resistance), `00004000` (supply outside range) or
+`00001000` (temperature outside range). The last three are now non-latching
+inhibits, and the first three were removed outright.
 
 The earlier heater images used **Thermal Runaway** for every latched stop,
 then automatically dismissed it using the time since the last button press.
@@ -219,10 +229,12 @@ The MCU's independent watchdog is configured to a nominal 500 ms at 40 kHz
 LSI. The finite PA10 pulse, not idle-task watchdog refresh, bounds a stalled
 controller's output. The native tests cover all duty/mode combinations, raw
 power ceilings, sample consumption, GPIO/timer sequencing, invalid sensors,
-open/short resistance, supply/temperature bounds, command expiry, recurring
-no-rise protection and continued near-target operation across microsecond
+open/short resistance, supply/temperature bounds, command expiry, the
+latching/non-latching fault split with its consecutive-bad-sample debounce,
+and continued near-target operation across microsecond
 rollover. They also cover a minute-long partial-power hold below target, renewed
-full-effort demand, reduced user/supply ceilings and zero-power window reset.
+full-effort demand, reduced user/supply ceilings, a warm handle above the old
+60 C bound, and automatic resumption after each transient inhibit.
 Diagnostic scheduling delays no longer latch a stop. Manual-recovery checks
 require a new valid sample, leave output off, preserve the work light, reject
 an ongoing short and retain flash/clock/trap/unknown error flags.
@@ -244,8 +256,8 @@ python3 source/Core/BSP/TS21/tools/emulate_boot.py \
   --check-heater short --instructions 160000000
 ```
 
-Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `continuous`, `range`,
-`hold`, `no-rise`, `uart`, `monitor` and `recover`, and
+Run with `startup`, `short`, `open`, `supply`, `overtemp`, `stall`, `continuous`,
+`range`, `uart`, `monitor` and `recover`, and
 exercise both interrupt-inherited and reset-context entry. It seeds saved
 autostart/boost/keepalive, a saved normal-range setpoint and the previous 5 W power
 setting, verifies unarmed startup, presses/releases the real
@@ -259,35 +271,37 @@ until acknowledged and correct tip-connection reporting afterward. A still-bad
 fixture must reject a bottom-button restart; a healthy acknowledged fault must
 allow a separate manual restart without a reboot or automatic heating;
 the stall run advances only the timer model after CPU execution is stopped.
+The transient runs (`open`, `supply`, `overtemp`, `continuous`, `range`) are
+the opposite case: they require that the injected condition withholds the gate
+**without** latching an error or showing a stop screen, then restore the
+fixture and require heating to resume by itself with no user action. A pulse
+already in flight is allowed to expire first, because the 120 ms one-pulse
+gate is deliberately not revocable; starting a *new* pulse during the inhibit
+is what fails the run.
 The `uart` run injects a receive overrun before the home-screen button action,
 requires the diagnostic error to stay recorded while a valid tip can heat
 within the existing bounds, and then requires a short-circuit fault to stop
 output normally. Native checks cover all four UART receive-error flags and
 ensure every other error bit still inhibits output, including when combined
 with a UART error.
-The `no-rise` run ages only the rise-watchdog timestamp for a fault check.
 The `recover` run additionally holds the bottom acknowledgment button for
 600 ms, requires the warning to stay until release, verifies an unarmed home
 screen, then uses a fresh press/release to restart bounded heating. Use
-`--check-heater recover --instructions 260000000`.
-The `range` run verifies that a saved 320 C or 850 F selection is retained,
-can heat above the old 100 C ceiling within the power limit, and does not trigger the
-rise watchdog at its effective target. It then checks the 500 C fault cutoff.
-Use `--check-heater range --instructions 200000000`, with `--fahrenheit` for
+`--check-heater recover --instructions 400000000`.
+The `range` run verifies that a saved 320 C or 850 F selection is retained and
+can heat above the old 100 C ceiling within the power limit. It then checks
+that the 500 C reading withholds output without latching and that heating
+resumes once the fixture returns to range.
+Use `--check-heater range --instructions 400000000`, with `--fahrenheit` for
 the upper Fahrenheit setting.
-The `hold` run injects a steady temperature 5 C below the effective target,
-requires real controller modulation with the rise window cleared, and ages
-only the rise timestamp across multiple holding commands. It then returns to
-a cold fixture, requires a fresh full-effort window, and verifies a genuine
-20-second no-rise stop with the normal warning and checked manual recovery.
-Use `--check-heater hold --instructions 260000000`; `--fahrenheit` also exercises
-holding below the effective 450 C target.
 The `continuous` run uses a scripted temperature rise, verifies controller
 modulation and continued operation beyond six seconds, then injects the exact
-500 C reading and checks shutdown and restart lockout. Use
+500 C reading and checks that output is withheld without a stop and resumes
+afterward. Use
 `--check-heater continuous --instructions 600000000` for its longer budget;
 `--fahrenheit` also exercises saved Fahrenheit settings. Native tests exercise
-continued operation for over a minute, renewed rise demand, counter rollover,
+continued operation for over a minute at a fixed temperature and full effort
+without any fault, counter rollover,
 and the actual shared controller's cold-start, idle and same-tick arithmetic.
 These are not hardware timing, energy or thermal measurements.
 Compressed fonts and translation buffers are compared byte-for-byte against
